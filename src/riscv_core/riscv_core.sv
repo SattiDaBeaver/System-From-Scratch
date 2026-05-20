@@ -57,15 +57,15 @@ module riscv_core #(
         is_j_instr = 1'b0;
 
         casez (instr[6:2])
-            5'b0?101: is_u_instr = 1'b1;
-            5'b0000?: is_i_instr = 1'b1;
-            5'b001?0: is_i_instr = 1'b1;
+            5'b0x101: is_u_instr = 1'b1;
+            5'b0000x: is_i_instr = 1'b1;
+            5'b001x0: is_i_instr = 1'b1;
             5'b11001: is_i_instr = 1'b1;
             5'b01011: is_r_instr = 1'b1;
             5'b01100: is_r_instr = 1'b1;
             5'b01110: is_r_instr = 1'b1;
             5'b10100: is_r_instr = 1'b1;
-            5'b0100?: is_s_instr = 1'b1;
+            5'b0100x: is_s_instr = 1'b1;
             5'b11000: is_b_instr = 1'b1;
             5'b11011: is_j_instr = 1'b1;
             default: ;
