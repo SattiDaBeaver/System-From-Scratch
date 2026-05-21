@@ -5,11 +5,18 @@ module riscv_core #(
     input  logic        rst,        // Active high
 
     // Instruction memory interface (read only)
-    input  logic [31:0] imem_addr,
-    output logic [31:0] imem_dout,   
+    output logic [31:0] imem_addr,
+    input  logic [31:0] imem_rdata,   
+
+    // Data memory
+    output logic [31:0] dmem_addr,
+    output logic [31:0] dmem_wdata,
+    output logic        dmem_we,
+    output logic        dmem_re,
+    input  logic [31:0] ld_data,
 
     // Junk wire
-    input  logic        junk
+    input  logic        _bogus
 );
 
     
@@ -30,13 +37,17 @@ module riscv_core #(
         is_jalr     ? jalr_tgt_pc :
         pc + 32'd4; // default
 
+    always_ff @(posedge clk) begin : ProgramCounter
+        pc <= next_pc;
+    end
+
     //******** Instruction Memory *********
     // Wires
     logic [31:0] instr;
 
     // Logic
     assign imem_addr    = pc;
-    assign instr        = imem_dout;
+    assign instr        = imem_rdata;
 
     //********** Decoder Logic ************
     // Wires
@@ -99,7 +110,7 @@ module riscv_core #(
     assign rs2_valid    = is_r_instr || is_s_instr || is_b_instr;
     assign funct3_valid = is_r_instr || is_s_instr || is_b_instr || is_i_instr;
     assign rd_valid     = is_r_instr || is_i_instr || is_u_instr || is_j_instr;
-    assign imm_valid    = is_r_instr || is_i_instr || is_b_instr || is_u_instr || is_j_instr;
+    assign imm_valid    = is_i_instr || is_s_instr || is_b_instr || is_u_instr || is_j_instr;
 
     assign imm = 
         is_i_instr ? {{21{instr[31]}}, instr[30:20]} :
@@ -177,5 +188,104 @@ module riscv_core #(
             default: ;
         endcase
     end
+
+    //******* Arithmetic Logic Unit *******
+    // Wires
+    logic [31:0] sltu_rslt;
+    logic [31:0] sltiu_rslt;
+    logic [63:0] sext_src1;
+    logic [63:0] sra_rslt;
+    logic [63:0] srai_rslt;
+    logic [31:0] result;
+    // Logic
+
+    // Set less than unsigned
+    assign sltu_rslt = {31'b0, src1_value < src2_value};
+    assign sltiu_rslt = {31'b0, src1_value < imm};
+
+    // Shift right arithmetic
+    // Sign extend
+    assign sext_src1 = {{32{src1_value[31]}}, src1_value};
+    // Shift sign-extended results
+    assign sra_rslt = sext_src1 >> src2_value[4:0];
+    assign srai_rslt = sext_src1 >> imm[4:0];
+
+    // ALU result
+    assign result = 
+        is_andi    ? src1_value & imm               :
+        is_ori     ? src1_value | imm               :
+        is_xori    ? src1_value ^ imm               :
+        is_addi    ? src1_value + imm               :
+        is_slli    ? src1_value << imm[5:0]         :
+        is_srli    ? src1_value >> imm[5:0]         :
+        is_and     ? src1_value & src2_value        :
+        is_or      ? src1_value | src2_value        :
+        is_xor     ? src1_value ^ src2_value        :
+        is_add     ? src1_value + src2_value        :
+        is_sub     ? src1_value - src2_value        :
+        is_sll     ? src1_value << src2_value[4:0]  :
+        is_srl     ? src1_value >> src2_value[4:0]  :
+        is_sltu    ? sltu_rslt                      :
+        is_sltiu   ? sltiu_rslt                     :
+        is_lui     ? {imm[31:12], 12'b0}            :
+        is_auipc   ? pc + imm                       :
+        is_jal     ? pc + 32'd4                     :
+        is_jalr    ? pc + 32'd4                     :
+        is_slt     ? ((src1_value[31] == src2_value[31]) ? sltu_rslt : {31'b0, src1_value[31]}) :
+        is_slti    ? ((src1_value[31] == imm[31]) ? sltiu_rslt : {31'b0, src1_value[31]}) :
+        is_sra     ? sra_rslt[31:0]                 :
+        is_srai    ? srai_rslt[31:0]                :
+        is_load    ? src1_value + imm               :
+        is_s_instr ? src1_value + imm               :
+        32'b0;
+
+    //********** Register File ************
+    // Wires
+    logic [31:0] wr_data;
+    logic        wr_en;
+    logic [31:0] src1_value;
+    logic [31:0] src2_value;
+
+    // Branch/jump targets
+    logic        taken_br;
+    logic [31:0] br_tgt_pc;
+    logic [31:0] jalr_tgt_pc;
+
+    // Logic
+    // Register file write
+    assign wr_data = is_load ? ld_data : result;
+    assign wr_en   = (rd == 5'b0) ? 1'b0 : rd_valid;
+
+    // Branch logic
+    assign taken_br =
+        is_beq  ? (src1_value == src2_value)                                :
+        is_bne  ? (src1_value != src2_value)                                :
+        is_blt  ? ((src1_value < src2_value) ^ (src1_value[31] != src2_value[31])) :
+        is_bge  ? ((src1_value >= src2_value) ^ (src1_value[31] != src2_value[31])) :
+        is_bltu ? (src1_value < src2_value)                                 :
+        is_bgeu ? (src1_value >= src2_value)                                :
+        1'b0;
+
+    assign br_tgt_pc   = pc + imm;
+    assign jalr_tgt_pc = src1_value + imm;
+
+    // Data memory interface
+    assign dmem_addr  = result;        // address computed by ALU
+    assign dmem_wdata = src2_value;    // rs2 is always the store data
+    assign dmem_we    = is_s_instr;
+    assign dmem_re    = is_load;
+
+    // Internal Register File
+    logic [31:0] regfile [31:0];
+
+    // Write port
+    always_ff @(posedge clk) begin
+        if (wr_en && (rd != 5'b0))
+            regfile[rd] <= wr_data;
+    end
+
+    // Read ports - x0 always 0
+    assign src1_value = (rs1 == 5'b0) ? 32'b0 : regfile[rs1];
+    assign src2_value = (rs2 == 5'b0) ? 32'b0 : regfile[rs2];
     
 endmodule

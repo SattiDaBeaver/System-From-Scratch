@@ -10,3 +10,7 @@
 19 May 2026
 - Started TLV to SV translation. Completed translation up to "Instructions". Need to implement "ALU" onwards.
 - Design in src/riscv_core/riscv_core.sv
+
+21 May 2026
+- Finished v1 of RV32I RTL.
+- Started work on the cocotb testbench suite.
