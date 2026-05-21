@@ -1,0 +1,10 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Cocotb/Verilator sim artifacts
+sim_build/
+*.fst
+*.vcd
+results.xml
