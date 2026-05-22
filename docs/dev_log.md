@@ -14,3 +14,5 @@
 21 May 2026
 - Finished v1 of RV32I RTL.
 - Started work on the cocotb testbench suite.
+- Finished testbench suite v1
+- Fully verfied all 27 instructions
