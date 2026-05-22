@@ -19,38 +19,22 @@ module riscv_core #(
     input  logic        _bogus
 );
 
-    
-    //********* Program Counter ***********
+    //*************************************
+    //*             Wires                 *
+    //*************************************
+    //********** Register File ************
     // Wires
-    logic [31:0] pc;
-    logic [31:0] next_pc;
+    logic [31:0] wr_data;
+    logic        wr_en;
+    logic [31:0] src1_value;
+    logic [31:0] src2_value;
 
-    // Special cases
-    logic [31:0] br_tgt_pc;
-    logic [31:0] jalr_tgt_pc;
-
-    // Logic
-    assign next_pc = 
-        rst         ? 32'b0 :
-        taken_br    ? br_tgt_pc :
-        is_jal      ? br_tgt_pc :
-        is_jalr     ? jalr_tgt_pc :
-        pc + 32'd4; // default
-
-    always_ff @(posedge clk) begin : ProgramCounter
-        pc <= next_pc;
-    end
-
-    //******** Instruction Memory *********
-    // Wires
-    logic [31:0] instr;
-
-    // Logic
-    assign imem_addr    = pc;
-    assign instr        = imem_rdata;
+    // Branch/jump targets
+    logic        taken_br;
 
     //********** Decoder Logic ************
-    // Wires
+    logic [31:0] instr;
+
     logic is_u_instr;
     logic is_i_instr;
     logic is_r_instr;
@@ -58,33 +42,7 @@ module riscv_core #(
     logic is_b_instr;
     logic is_j_instr;
 
-    // Logic
-    always_comb begin : Decoder_Logic
-        is_u_instr = 1'b0;
-        is_i_instr = 1'b0;
-        is_r_instr = 1'b0;
-        is_s_instr = 1'b0;
-        is_b_instr = 1'b0;
-        is_j_instr = 1'b0;
-
-        casez (instr[6:2])
-            5'b0x101: is_u_instr = 1'b1;
-            5'b0000x: is_i_instr = 1'b1;
-            5'b001x0: is_i_instr = 1'b1;
-            5'b11001: is_i_instr = 1'b1;
-            5'b01011: is_r_instr = 1'b1;
-            5'b01100: is_r_instr = 1'b1;
-            5'b01110: is_r_instr = 1'b1;
-            5'b10100: is_r_instr = 1'b1;
-            5'b0100x: is_s_instr = 1'b1;
-            5'b11000: is_b_instr = 1'b1;
-            5'b11011: is_j_instr = 1'b1;
-            default: ;
-        endcase
-    end
-
     //******** Instruction Fields *********
-    // Wires
     logic [4:0] rs1;
     logic [4:0] rs2;
     logic [2:0] funct3;
@@ -99,7 +57,78 @@ module riscv_core #(
 
     logic [31:0] imm;
 
-    // Logic
+    //*********** Instructions ************
+    logic is_lui, is_auipc, is_jal, is_jalr;
+    logic is_beq, is_bne, is_blt, is_bge, is_bltu, is_bgeu;
+    logic is_addi, is_slti, is_sltiu, is_xori, is_ori, is_andi;
+    logic is_slli, is_srli, is_srai;
+    logic is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and;
+    logic is_load;
+
+    logic [10:0] dec_bits;
+
+    //******* Arithmetic Logic Unit *******
+    logic [31:0] sltu_rslt;
+    logic [31:0] sltiu_rslt;
+    logic [63:0] sext_src1;
+    logic [63:0] sra_rslt;
+    logic [63:0] srai_rslt;
+    logic [31:0] result;
+
+    //********* Program Counter ***********
+    // Wires
+    logic [31:0] pc;
+    logic [31:0] next_pc;
+
+    // Special cases
+    logic [31:0] br_tgt_pc;
+    logic [31:0] jalr_tgt_pc;
+
+
+    //*************************************
+    //*             Logic                 *
+    //*************************************
+    //********** Register File ************
+    assign next_pc = 
+        rst         ? 32'b0 :
+        taken_br    ? br_tgt_pc :
+        is_jal      ? br_tgt_pc :
+        is_jalr     ? jalr_tgt_pc :
+        pc + 32'd4; // default
+
+    always_ff @(posedge clk) begin : ProgramCounter
+        pc <= next_pc;
+    end
+
+    //******** Instruction Memory *********
+    assign imem_addr    = pc;
+    assign instr        = imem_rdata;
+
+    always_comb begin : Decoder_Logic
+        is_u_instr = 1'b0;
+        is_i_instr = 1'b0;
+        is_r_instr = 1'b0;
+        is_s_instr = 1'b0;
+        is_b_instr = 1'b0;
+        is_j_instr = 1'b0;
+
+        casez (instr[6:2])
+            5'b0?101: is_u_instr = 1'b1;
+            5'b0000?: is_i_instr = 1'b1;
+            5'b001?0: is_i_instr = 1'b1;
+            5'b11001: is_i_instr = 1'b1;
+            5'b01011: is_r_instr = 1'b1;
+            5'b01100: is_r_instr = 1'b1;
+            5'b01110: is_r_instr = 1'b1;
+            5'b10100: is_r_instr = 1'b1;
+            5'b0100?: is_s_instr = 1'b1;
+            5'b11000: is_b_instr = 1'b1;
+            5'b11011: is_j_instr = 1'b1;
+            default: ;
+        endcase
+    end
+
+    //******** Instruction Fields *********
     assign rs1      = instr[19:15];
     assign rs2      = instr[24:20];
     assign funct3   = instr[14:12];
@@ -118,20 +147,9 @@ module riscv_core #(
         is_u_instr ? {instr[31:12], 12'b0} :
         is_b_instr ? {{20{instr[31]}}, instr[7], instr[30:25], instr[11:8], 1'b0} :
         is_j_instr ? {{12{instr[31]}}, instr[19:12], instr[20], instr[30:25], instr[24:21], 1'b0} :
-        32'b0; // default
+        32'b0; 
 
     //*********** Instructions ************
-    // Wires
-    logic is_lui, is_auipc, is_jal, is_jalr;
-    logic is_beq, is_bne, is_blt, is_bge, is_bltu, is_bgeu;
-    logic is_addi, is_slti, is_sltiu, is_xori, is_ori, is_andi;
-    logic is_slli, is_srli, is_srai;
-    logic is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and;
-    logic is_load;
-
-    logic [10:0] dec_bits;
-
-    // Logic
     assign dec_bits = {instr[30], funct3, opcode};
 
     always_comb begin
@@ -149,26 +167,26 @@ module riscv_core #(
 
         casez (dec_bits)
             // U-type
-            11'bx_xxx_0110111: is_lui   = 1'b1;
-            11'bx_xxx_0010111: is_auipc = 1'b1;
+            11'b?_???_0110111: is_lui   = 1'b1;
+            11'b?_???_0010111: is_auipc = 1'b1;
             // Jumps
-            11'bx_xxx_1101111: is_jal   = 1'b1;
-            11'bx_xxx_1100111: is_jalr  = 1'b1;
+            11'b?_???_1101111: is_jal   = 1'b1;
+            11'b?_???_1100111: is_jalr  = 1'b1;
             // Branches
-            11'bx_000_1100011: is_beq   = 1'b1;
-            11'bx_001_1100011: is_bne   = 1'b1;
-            11'bx_100_1100011: is_blt   = 1'b1;
-            11'bx_101_1100011: is_bge   = 1'b1;
-            11'bx_110_1100011: is_bltu  = 1'b1;
-            11'bx_111_1100011: is_bgeu  = 1'b1;
+            11'b?_000_1100011: is_beq   = 1'b1;
+            11'b?_001_1100011: is_bne   = 1'b1;
+            11'b?_100_1100011: is_blt   = 1'b1;
+            11'b?_101_1100011: is_bge   = 1'b1;
+            11'b?_110_1100011: is_bltu  = 1'b1;
+            11'b?_111_1100011: is_bgeu  = 1'b1;
             // I-type ALU
-            11'bx_000_0010011: is_addi  = 1'b1;
-            11'bx_010_0010011: is_slti  = 1'b1;
-            11'bx_011_0010011: is_sltiu = 1'b1;
-            11'bx_100_0010011: is_xori  = 1'b1;
-            11'bx_110_0010011: is_ori   = 1'b1;
-            11'bx_111_0010011: is_andi  = 1'b1;
-            // Shifts (instr[30] matters here)
+            11'b?_000_0010011: is_addi  = 1'b1;
+            11'b?_010_0010011: is_slti  = 1'b1;
+            11'b?_011_0010011: is_sltiu = 1'b1;
+            11'b?_100_0010011: is_xori  = 1'b1;
+            11'b?_110_0010011: is_ori   = 1'b1;
+            11'b?_111_0010011: is_andi  = 1'b1;
+            // Shifts 
             11'b0_001_0010011: is_slli  = 1'b1;
             11'b0_101_0010011: is_srli  = 1'b1;
             11'b1_101_0010011: is_srai  = 1'b1;
@@ -184,21 +202,12 @@ module riscv_core #(
             11'b0_110_0110011: is_or    = 1'b1;
             11'b0_111_0110011: is_and   = 1'b1;
             // Load
-            11'bx_xxx_0000011: is_load  = 1'b1;
+            11'b?_???_0000011: is_load  = 1'b1;
             default: ;
         endcase
     end
 
     //******* Arithmetic Logic Unit *******
-    // Wires
-    logic [31:0] sltu_rslt;
-    logic [31:0] sltiu_rslt;
-    logic [63:0] sext_src1;
-    logic [63:0] sra_rslt;
-    logic [63:0] srai_rslt;
-    logic [31:0] result;
-    // Logic
-
     // Set less than unsigned
     assign sltu_rslt = {31'b0, src1_value < src2_value};
     assign sltiu_rslt = {31'b0, src1_value < imm};
@@ -240,18 +249,6 @@ module riscv_core #(
         32'b0;
 
     //********** Register File ************
-    // Wires
-    logic [31:0] wr_data;
-    logic        wr_en;
-    logic [31:0] src1_value;
-    logic [31:0] src2_value;
-
-    // Branch/jump targets
-    logic        taken_br;
-    logic [31:0] br_tgt_pc;
-    logic [31:0] jalr_tgt_pc;
-
-    // Logic
     // Register file write
     assign wr_data = is_load ? ld_data : result;
     assign wr_en   = (rd == 5'b0) ? 1'b0 : rd_valid;
