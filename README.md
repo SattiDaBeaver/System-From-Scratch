@@ -47,4 +47,4 @@ extension in VSCode.
 | Module | Description |
 |---|---|
 | `testbench.test_basic` | Basic addi/add sanity check |
-| `testbench.test_full` | Full RV32I coverage — all 27 checks, x5-x30 == 1 |
+| `testbench.test_full` | Full RV32I coverage: all 27 checks, x5-x30 == 1 |
