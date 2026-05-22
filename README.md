@@ -29,11 +29,12 @@ make clean                                # clean sim artifacts
 ```
 
 ### Structure
-test/
-├── asm_programs/       # assembly programs loaded into simulated memory
-├── testbench/          # cocotb test files + tb_core.sv memory wrapper
-├── utils.py            # shared helpers (reset, load_imem, assemble, read_reg)
-└── Makefile
+
+    test/
+    ├── asm_programs/       # assembly programs loaded into simulated memory
+    ├── testbench/          # cocotb test files + tb_core.sv memory wrapper
+    ├── utils.py            # shared helpers (reset, load_imem, assemble, read_reg)
+    └── Makefile
 
 ### Test Results
 
