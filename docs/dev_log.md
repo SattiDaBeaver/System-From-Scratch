@@ -16,3 +16,9 @@
 - Started work on the cocotb testbench suite.
 - Finished testbench suite v1
 - Fully verfied all 27 instructions
+
+24 May 2026
+- Added UART module
+- Created DPRAM module from Quartus IP
+- Created riscv wrapper with UART and DPRAM
+- TODO: Test top wrapper and write bootloader
