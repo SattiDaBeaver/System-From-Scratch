@@ -8,3 +8,35 @@ sim_build/
 *.fst
 *.vcd
 results.xml
+
+# Quartus project files
+fpga/*.qpf
+fpga/*.qsf
+fpga/*.qws
+fpga/*.bak
+
+# Quartus output/build files
+fpga/output_files/
+fpga/db/
+fpga/incremental_db/
+fpga/.qsys_edit/
+fpga/simulation/
+fpga/greybox_tmp/
+fpga/unsaved/
+fpga/*.sof
+fpga/*.pof
+fpga/*.jdi
+fpga/*.pin
+fpga/*.rpt
+fpga/*.summary
+fpga/*.smsg
+fpga/*.tcl
+fpga/*.qip
+
+# IP generated files (keep .v and .sv, ignore the rest)
+fpga/**/*.bsf
+fpga/**/*.cmp
+fpga/**/*.inc
+fpga/**/*.bb.v
+fpga/**/*.rif
+fpga/**/*.hex
