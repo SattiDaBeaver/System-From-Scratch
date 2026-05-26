@@ -4,11 +4,13 @@
 SIM              	?= verilator
 TOPLEVEL_LANG		= verilog
 
-VERILOG_SOURCES   = $(PWD)/../src/riscv_core/riscv_core.sv
-VERILOG_SOURCES  += $(PWD)/testbench/tb_core.sv
+VERILOG_SOURCES     = $(PWD)/../src/riscv_core/riscv_core.sv
+VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
+VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
+VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv
 
-TOPLEVEL          	= tb_core
-MODULE           	?= testbench.test_full
+TOPLEVEL          	?= tb_soc
+MODULE           	?= testbench.test_bootloader
 
 EXTRA_ARGS       	+= --trace-fst
 EXTRA_ARGS       	+= --trace-structs
