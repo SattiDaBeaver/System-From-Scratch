@@ -22,6 +22,8 @@ fpga/incremental_db/
 fpga/.qsys_edit/
 fpga/simulation/
 fpga/greybox_tmp/
+fpga/board/
+fpga/timing/
 fpga/unsaved/
 fpga/*.sof
 fpga/*.pof

@@ -95,7 +95,7 @@ module riscv_core #(
     //     is_jalr     ? jalr_tgt_pc :
     //     pc + 32'd4; // default
 
-    always_ff @(posedge clk or posedge rst) begin : ProgramCounter
+    always_ff @(posedge clk) begin : ProgramCounter
         if (rst)
             pc <= 32'b0;
         else

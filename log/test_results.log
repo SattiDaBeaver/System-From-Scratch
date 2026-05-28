@@ -12,3 +12,10 @@
 [2026-05-25 21:21] testbench.test_bootloader - 1 total, 0 passed, 1 failed
 [2026-05-25 21:23] testbench.test_bootloader - 1 total, 0 passed, 1 failed
 [2026-05-25 21:25] testbench.test_bootloader - 1 total, 1 passed, 0 failed
+[2026-05-27 21:59] testbench.test_bootloader - 1 total, 1 passed, 0 failed
+[2026-05-27 22:00] testbench.test_core -  total, 0 passed,  failed
+[2026-05-27 22:00] testbench.test_full -  total, 0 passed,  failed
+[2026-05-27 22:00] testbench.test_full -  total, 0 passed,  failed
+[2026-05-27 22:02] testbench.test_full - 27 total, 27 passed, 0 failed
+[2026-05-27 22:04] testbench.test_full - 27 total, 1 passed, 26 failed
+[2026-05-27 22:04] testbench.test_full - 27 total, 27 passed, 0 failed

@@ -9,8 +9,8 @@ VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv
 
-TOPLEVEL          	?= tb_soc
-MODULE           	?= testbench.test_bootloader
+TOPLEVEL          	?= tb_core
+MODULE           	?= testbench.test_full
 
 EXTRA_ARGS       	+= --trace-fst
 EXTRA_ARGS       	+= --trace-structs
