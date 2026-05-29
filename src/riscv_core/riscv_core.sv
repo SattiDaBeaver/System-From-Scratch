@@ -95,13 +95,15 @@ module riscv_core #(
     //     is_jalr     ? jalr_tgt_pc :
     //     pc + 32'd4; // default
 
-    always_ff @(posedge clk or posedge rst) begin : ProgramCounter
-        if (rst)
+    always_ff @(posedge clk/* or posedge rst*/) begin : ProgramCounter
+        if (rst) begin
             pc <= 32'b0;
-        else
+        end
+        else begin
             if (taken_br || is_jal) pc <= br_tgt_pc;
             else if (is_jalr)       pc <= jalr_tgt_pc;
             else                    pc <= pc + 32'd4;
+        end
     end
 
     //******** Instruction Memory *********
