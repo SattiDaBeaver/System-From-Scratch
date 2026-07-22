@@ -172,16 +172,23 @@ module UART_RX #(
                 end
 
                 DONE: begin
-                    if (clkCount < clk_per_bit - 1) begin
-                        clkCount <= clkCount + 1;
-                        state <= DONE;
-                    end
-                    else begin
+                    // RECEIVE's last iteration ends at mid-stop-bit (each
+                    // sample is taken a full bit period after START's own
+                    // mid-start-bit point). Waiting another full period
+                    // here (as opposed to a half period, mirroring START)
+                    // overshoots into the middle of a back-to-back next
+                    // byte's start bit, so IDLE re-enters already mid-frame
+                    // and START's half-period wait then oversamples it.
+                    if (clkCount == ((clk_per_bit - 1) >> 1)) begin
                         clkCount <= 0;
                         state <= IDLE;
                         dataDone <= 1'b1;
                         index <= 0;
                         RXout <= dataOut;
+                    end
+                    else begin
+                        clkCount <= clkCount + 1;
+                        state <= DONE;
                     end
                 end
 

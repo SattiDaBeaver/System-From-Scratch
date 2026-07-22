@@ -64,22 +64,25 @@ _start:
 recv_loop:
     beq  x22, x0, recv_done
     jal  x1, uart_rx_byte        # get byte 0
+    xor  x23, x23, x10           # checksum over byte 0 (matches host's per-byte XOR)
     mv   x24, x10
 
     jal  x1, uart_rx_byte        # get byte 1
+    xor  x23, x23, x10           # checksum over byte 1
     slli x10, x10, 8
     or   x24, x24, x10
 
     jal  x1, uart_rx_byte        # get byte 2
+    xor  x23, x23, x10           # checksum over byte 2
     slli x10, x10, 16
     or   x24, x24, x10
 
     jal  x1, uart_rx_byte        # get byte 3
+    xor  x23, x23, x10           # checksum over byte 3
     slli x10, x10, 24
     or   x24, x24, x10
 
     sw   x24, 0(x21)             # store word
-    xor  x23, x23, x24           # update checksum over word
     addi x21, x21, 4             # increment by word
     addi x22, x22, -4            # decrement by 4
     j    recv_loop

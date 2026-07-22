@@ -1,6 +1,10 @@
 module tb_soc (
     input logic clk,
-    input logic rst
+    input logic rst,
+
+    // Debug UART pins, mirroring fpga/riscv_top.sv's ARDUINO_IO[2:3]
+    input  logic dbg_rx,
+    output logic dbg_tx
 );
     // UART wires
     logic uart_tx;
@@ -14,6 +18,10 @@ module tb_soc (
     logic        dmem_we;
     logic        dmem_re;
     logic [31:0] ld_data;
+    logic [4:0]  dbg_reg_addr;
+    logic [31:0] dbg_reg_data;
+    logic [31:0] pc_dbg;
+    logic        halt;
 
     // UART signals
     logic        uart_tx_en;
@@ -102,16 +110,35 @@ module tb_soc (
     riscv_core u_core (
         .clk        (clk),
         .rst        (rst),
+        .halt       (halt),
         .imem_addr  (imem_addr),
         .imem_rdata (imem_rdata),
         .dmem_addr  (dmem_addr),
         .dmem_wdata (dmem_wdata),
         .dmem_we    (dmem_we),
         .dmem_re    (dmem_re),
-        .ld_data    (ld_data)
+        .ld_data    (ld_data),
+        .dbg_reg_addr(dbg_reg_addr),
+        .dbg_reg_data(dbg_reg_data),
+        .pc_dbg     (pc_dbg)
     );
 
     // Tie off UART RX for now
     assign uart_rx = 1'b1;
+
+    // Debug UART
+    debug_uart #(
+        .CLK_BITS (16)
+    ) u_debug_uart (
+        .clk          (clk),
+        .rst          (rst),
+        .clk_per_bit  (16'd434),
+        .dbg_rx       (dbg_rx),
+        .dbg_tx       (dbg_tx),
+        .dbg_reg_addr (dbg_reg_addr),
+        .dbg_reg_data (dbg_reg_data),
+        .pc_dbg       (pc_dbg),
+        .halt         (halt)
+    );
 
 endmodule

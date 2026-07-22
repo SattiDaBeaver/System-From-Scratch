@@ -6,8 +6,10 @@ TOPLEVEL_LANG		= verilog
 
 VERILOG_SOURCES     = $(PWD)/../src/riscv_core/riscv_core.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
+VERILOG_SOURCES     += $(PWD)/../src/peripherals/debug_uart.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv
+VERILOG_SOURCES     += $(PWD)/testbench/tb_uart.sv
 
 TOPLEVEL          	?= tb_core
 MODULE           	?= testbench.test_full

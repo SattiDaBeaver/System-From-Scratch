@@ -66,13 +66,15 @@ def read_reg(dut, reg):
 # *****************************
 
 ASM_DIR = os.path.join(os.path.dirname(__file__), "asm_programs")
+BOOTLOADER_DIR = os.path.join(os.path.dirname(__file__), "..", "src", "bootloader")
 
-def assemble(filename):
+def assemble(filename, search_dir=ASM_DIR):
     """
     Assemble a .asm file and return a list of 32-bit instruction words.
     filename: just the name, e.g. "add_test.asm"
+    search_dir: directory to look in (defaults to test/asm_programs/)
     """
-    src  = os.path.join(ASM_DIR, filename)
+    src  = os.path.join(search_dir, filename)
     obj  = "/tmp/rv_test.o"
     binary = "/tmp/rv_test.bin"
 

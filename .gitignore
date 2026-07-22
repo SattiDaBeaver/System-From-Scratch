@@ -3,6 +3,10 @@
 __pycache__/
 *.pyc
 
+# Claude
+CLAUDE.md
+.claude/
+
 # Cocotb/Verilator sim artifacts
 sim_build/
 *.fst

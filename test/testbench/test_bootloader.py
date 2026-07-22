@@ -6,7 +6,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from utils import reset, run_cycles, assemble
+from utils import reset, run_cycles, assemble, BOOTLOADER_DIR
 
 
 @cocotb.test()
@@ -16,7 +16,7 @@ async def test_bootloader_tx(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
 
     # Load bootloader into imem
-    words = assemble("bootloader.asm")
+    words = assemble("bootloader.asm", search_dir=BOOTLOADER_DIR)
     for i, w in enumerate(words):
         dut.imem[i].value = w
 

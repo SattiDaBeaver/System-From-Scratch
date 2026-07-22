@@ -20,6 +20,9 @@ module tb_core #(
     logic        dmem_we;
     logic        dmem_re;
     logic [31:0] ld_data;
+    logic [4:0]  dbg_reg_addr;
+    logic [31:0] dbg_reg_data;
+    logic [31:0] pc_dbg;
 
     // Instantiate core
     riscv_core #(
@@ -27,13 +30,17 @@ module tb_core #(
     ) u_core (
         .clk        (clk),
         .rst        (rst),
+        .halt       (1'b0),
         .imem_addr  (imem_addr),
         .imem_rdata (imem_rdata),
         .dmem_addr  (dmem_addr),
         .dmem_wdata (dmem_wdata),
         .dmem_we    (dmem_we),
         .dmem_re    (dmem_re),
-        .ld_data    (ld_data)
+        .ld_data    (ld_data),
+        .dbg_reg_addr(dbg_reg_addr),
+        .dbg_reg_data(dbg_reg_data),
+        .pc_dbg     (pc_dbg)
     );
 
     // Instruction memory - async read

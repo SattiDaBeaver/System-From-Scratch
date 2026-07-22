@@ -68,6 +68,10 @@ module riscv_top (
     logic        dmem_we;
     logic        dmem_re;
     logic [31:0] ld_data;
+    logic [4:0]  dbg_reg_addr;
+    logic [31:0] dbg_reg_data;
+    logic [31:0] pc_dbg;
+    logic        halt;
 
     // ──────────────────────────────────────
     //  UART Wires
@@ -89,6 +93,18 @@ module riscv_top (
     // clk_per_bit for 115200 baud @ 50MHz
     // 50_000_000 / 115200 = 434
     localparam CLK_PER_BIT = 16'd434;
+
+    // ──────────────────────────────────────
+    //  Debug UART Wires
+    // ──────────────────────────────────────
+    logic dbg_rx;
+    logic dbg_tx;
+
+    // ARDUINO_IO[2] = debug RX (input), ARDUINO_IO[3] = debug TX (output)
+    // Separate pins/UART from the program link so the debugger stays
+    // alive even while the core's own UART is busy or the program hangs.
+    assign dbg_rx        = ARDUINO_IO[2];
+    assign ARDUINO_IO[3]  = dbg_tx;
 
     // ──────────────────────────────────────
     //  Address Decoder
@@ -225,13 +241,38 @@ module riscv_top (
     riscv_core u_core (
         .clk        (core_clk),
         .rst        (rst),
+        .halt       (halt),
         .imem_addr  (imem_addr),
         .imem_rdata (imem_rdata),
         .dmem_addr  (dmem_addr),
         .dmem_wdata (dmem_wdata),
         .dmem_we    (dmem_we),
         .dmem_re    (dmem_re),
-        .ld_data    (ld_data)
+        .ld_data    (ld_data),
+        .dbg_reg_addr(dbg_reg_addr),
+        .dbg_reg_data(dbg_reg_data),
+        .pc_dbg     (pc_dbg)
+    );
+
+    // ──────────────────────────────────────
+    //  Debug UART
+    // ──────────────────────────────────────
+    // NOTE: halt/step are asserted on `clk`, not `core_clk` — single-step
+    // is only cycle-accurate when SW[0] selects core_clk == clk. Stepping
+    // while core_clk == slow_clk will release halt for one `clk` period,
+    // which may not align with a slow_clk edge.
+    debug_uart #(
+        .CLK_BITS (16)
+    ) u_debug_uart (
+        .clk          (clk),
+        .rst          (rst),
+        .clk_per_bit  (CLK_PER_BIT),
+        .dbg_rx       (dbg_rx),
+        .dbg_tx       (dbg_tx),
+        .dbg_reg_addr (dbg_reg_addr),
+        .dbg_reg_data (dbg_reg_data),
+        .pc_dbg       (pc_dbg),
+        .halt         (halt)
     );
 
 endmodule
