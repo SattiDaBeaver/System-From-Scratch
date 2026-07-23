@@ -179,7 +179,7 @@ module riscv_top (
     assign h4 = imem_rdata[19:16];
     assign h5 = imem_rdata[23:20];
 
-    assign LEDR[9:0] = imem_addr[11:2];
+    assign LEDR[9:0] = {~dbg_rx, ~dbg_tx, 1'b0, imem_addr[8:2]};
 
     // ──────────────────────────────────────
     //  DP BRAM
@@ -241,7 +241,7 @@ module riscv_top (
     riscv_core u_core (
         .clk        (core_clk),
         .rst        (rst),
-        .halt       (halt),
+        .halt       (halt & KEY[1]),
         .imem_addr  (imem_addr),
         .imem_rdata (imem_rdata),
         .dmem_addr  (dmem_addr),

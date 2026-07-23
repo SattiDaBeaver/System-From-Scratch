@@ -18,8 +18,7 @@ module riscv_core #(
 
     // Debug interface (read only, no effect on core behavior)
     // Async indexed read instead of exposing the full regfile as a packed
-    // array port -- Quartus doesn't support multi-dim arrays on top-level
-    // synthesis I/O.
+    // array port 
     input  logic [4:0]  dbg_reg_addr,
     output logic [31:0] dbg_reg_data,
     output logic [31:0] pc_dbg,
@@ -104,7 +103,7 @@ module riscv_core #(
     //     is_jalr     ? jalr_tgt_pc :
     //     pc + 32'd4; // default
 
-    always_ff @(posedge clk/* or posedge rst*/) begin : ProgramCounter
+    always_ff @(posedge clk or posedge rst) begin : ProgramCounter
         if (rst) begin
             pc <= 32'b0;
         end

@@ -94,7 +94,7 @@ module debug_uart #(
     always_ff @(posedge clk) begin
         if (rst) begin
             state      <= CMD_IDLE;
-            halt       <= 1'b0;
+            halt       <= 1'b1; // Temporarily halt on reset (change later to rest to 0 but be persistent at 1) 
             word_sel   <= 6'd0;
             word_count <= 6'd0;
             byte_sel   <= 2'd0;
