@@ -1,4 +1,22 @@
-module riscv_top (
+// test/testbench/tb_top.sv
+//
+// Simulation counterpart to fpga/riscv_top.sv, for testing the top-level
+// wrapper's own logic (clock divider, program/debug UART mux on SW[0],
+// halt gating on KEY[1]) rather than just the core in isolation (that's
+// what tb_core.sv/tb_soc.sv already cover).
+//
+// Two differences from riscv_top.sv, both purely to make this simulatable
+// and testable with cocotb -- everything else is a straight copy, so
+// porting future riscv_top.sv changes here should be mechanical:
+//   1. dp_ram (Quartus altsyncram megafunction, no Verilator support) is
+//      swapped for dp_ram_model (fpga/dp_ram_model.v), a behavioral
+//      equivalent.
+//   2. ARDUINO_IO's inout bundle is split into separate ext_rx (input) /
+//      ext_tx (output) ports instead of a single inout, so cocotb can
+//      drive/observe each side without inout-net gymnastics. ext_rx/ext_tx
+//      map 1:1 onto ARDUINO_IO[0]/ARDUINO_IO[1] on real hardware.
+
+module tb_top (
     input  logic [9:0] SW,
     input  logic [1:0] KEY,
     input  logic       CLOCK_50,
@@ -11,24 +29,13 @@ module riscv_top (
     output logic [6:0] HEX0,
     output logic [9:0] LEDR,
 
-    output logic [3:0] VGA_R,
-    output logic [3:0] VGA_G,
-    output logic [3:0] VGA_B,
-    output logic       VGA_HS,
-    output logic       VGA_VS,
-
-    inout  logic [15:0] ARDUINO_IO
+    input  logic        ext_rx,  // mirrors ARDUINO_IO[0]
+    output logic        ext_tx   // mirrors ARDUINO_IO[1]
 );
 
     // ──────────────────────────────────────
     //  Clock and Reset
     // ──────────────────────────────────────
-    // Single 25MHz system clock for everything (core, both UARTs, BRAM) --
-    // the single-cycle core can't close timing at the full 50MHz CLOCK_50,
-    // so rather than keep a separate core_clk/clk split (which needs a
-    // clock-domain-crossing-aware STEP pulse for the debug UART), just
-    // divide once and run the whole design off the divided clock. No CDC
-    // anywhere in this design as a result.
     logic clk50;
     logic clk;
     logic rst;
@@ -43,23 +50,6 @@ module riscv_top (
     end
 
     assign clk = clk_div_toggle;  // CLOCK_50 / 2 = 25MHz
-
-    // ──────────────────────────────────────
-    //  Unused outputs tied off for now
-    // ──────────────────────────────────────
-    // assign HEX5 = 7'h7F;
-    // assign HEX4 = 7'h7F;
-    // assign HEX3 = 7'h7F;
-    // assign HEX2 = 7'h7F;
-    // assign HEX1 = 7'h7F;
-    // assign HEX0 = 7'h7F;
-    // assign LEDR = 10'b0;
-
-    assign VGA_R  = 4'b0;
-    assign VGA_G  = 4'b0;
-    assign VGA_B  = 4'b0;
-    assign VGA_HS = 1'b1;
-    assign VGA_VS = 1'b1;
 
     // ──────────────────────────────────────
     //  Core Interface Wires
@@ -107,14 +97,12 @@ module riscv_top (
     logic dbg_rx;
     logic dbg_tx;
 
-    // ARDUINO_IO[0] = RX (input), ARDUINO_IO[1] = TX (output) -- single
-    // external serial link, shared by both the program UART and the debug
-    // UART. SW[0] picks which one is actually connected to the pins, so
-    // switching between "talk to my program" and "halt/step/read regs"
-    // is a switch flip instead of moving a cable between ARDUINO headers.
-    assign uart_rx = SW[0] ? 1'b1 : ARDUINO_IO[0];  // idle-high when not selected
-    assign dbg_rx  = SW[0] ? ARDUINO_IO[0] : 1'b1;
-    assign ARDUINO_IO[1] = SW[0] ? dbg_tx : uart_tx;
+    // ext_rx/ext_tx = ARDUINO_IO[0]/[1] -- single external serial link,
+    // shared by both the program UART and the debug UART. SW[0] picks
+    // which one is actually connected to the pins.
+    assign uart_rx = SW[0] ? 1'b1 : ext_rx;  // idle-high when not selected
+    assign dbg_rx  = SW[0] ? ext_rx : 1'b1;
+    assign ext_tx  = SW[0] ? dbg_tx : uart_tx;
 
     // ──────────────────────────────────────
     //  Address Decoder
@@ -192,13 +180,12 @@ module riscv_top (
     assign LEDR[9:0] = {~dbg_rx, ~dbg_tx, 1'b0, imem_addr[8:2]};
 
     // ──────────────────────────────────────
-    //  DP BRAM
+    //  DP BRAM (behavioral model -- see fpga/dp_ram_model.v)
     // ──────────────────────────────────────
     // Port B is normally the core's data memory port; while the debug
     // UART is servicing WRITE_MEM/READ_MEM (dbg_mem_valid), it takes over
-    // port B instead. debug_uart only ever asserts dbg_mem_valid while
-    // halt is set (see debug_uart.sv), so this can't race a running
-    // program's own dmem accesses.
+    // port B instead -- see fpga/riscv_top.sv for the hardware copy of
+    // this mux.
     logic [31:0] bram_addr_b;
     logic [31:0] bram_data_b;
     logic        bram_we_b;
@@ -208,7 +195,9 @@ module riscv_top (
     assign bram_we_b   = dbg_mem_valid ? dbg_mem_we    : (dmem_we && bram_sel);
     assign dbg_mem_rdata = bram_rd_data;
 
-    dp_ram u_bram (
+    dp_ram_model #(
+        .REGISTERED_ADDR (0)
+    ) u_bram (
         .clock      (clk),
         // Port A — instruction fetch
         .address_a  (imem_addr[13:2]),
@@ -267,9 +256,6 @@ module riscv_top (
     // ──────────────────────────────────────
     //  Debug UART
     // ──────────────────────────────────────
-    // Core, program UART, and debug UART all now share one clk (25MHz) --
-    // no more core_clk/clk split, so STEP's one-cycle halt-drop pulse is
-    // always exactly one core clock cycle, unconditionally.
     debug_uart #(
         .CLK_BITS (16)
     ) u_debug_uart (

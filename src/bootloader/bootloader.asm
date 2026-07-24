@@ -25,6 +25,7 @@
 #   x3  = UART base address
 #   x4  = scratch / temp
 #   x5  = scratch / temp
+#   x6  = uart_rx_byte's timeout counter
 #   x10 = function arg / return value (a0)
 
 .section .text
@@ -121,15 +122,25 @@ tx_wait:
 
 # ────────────────────────────────────────────
 #  uart_rx_byte
-#  Wait for and return received byte in x10
-#  Clobbers: x4
+#  Wait for and return received byte in x10.
+#  If no byte arrives within RX_TIMEOUT poll iterations (host went away
+#  or a byte got dropped mid-transfer), restart the whole handshake from
+#  _start instead of hanging forever -- host can just retry the upload.
+#  Clobbers: x4, x6
 # ────────────────────────────────────────────
+RX_TIMEOUT = 2000000
+
 uart_rx_byte:
+    li   x6, RX_TIMEOUT
     # Wait for RX_done
 rx_wait:
     lw   x4, 8(x3)               # read status register
     andi x4, x4, 2               # check RX_done (bit 1)
-    beq  x4, x0, rx_wait         # loop if not done
+    bne  x4, x0, rx_got_byte     # done if not done -> fall through to timeout check
+    addi x6, x6, -1
+    beq  x6, x0, _start          # timed out -- restart handshake
+    j    rx_wait
 
+rx_got_byte:
     lw   x10, 4(x3)              # read RX data register
     ret

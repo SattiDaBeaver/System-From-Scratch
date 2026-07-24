@@ -14,8 +14,8 @@ sim_build/
 results.xml
 
 # Quartus project files
-fpga/*.qpf
-fpga/*.qsf
+# fpga/*.qpf
+# fpga/*.qsf
 fpga/*.qws
 fpga/*.bak
 
@@ -29,8 +29,8 @@ fpga/greybox_tmp/
 fpga/board/
 fpga/timing/
 fpga/unsaved/
-fpga/*.sof
-fpga/*.pof
+# fpga/*.sof
+# fpga/*.pof
 fpga/*.jdi
 fpga/*.pin
 fpga/*.rpt

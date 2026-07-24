@@ -23,6 +23,14 @@ module tb_soc (
     logic [31:0] pc_dbg;
     logic        halt;
 
+    // Debug-UART-driven dmem access (hardware bootloader) -- see the
+    // dmem port B mux below.
+    logic [31:0] dbg_mem_addr;
+    logic [31:0] dbg_mem_wdata;
+    logic        dbg_mem_we;
+    logic        dbg_mem_valid;
+    logic [31:0] dbg_mem_rdata;
+
     // UART signals
     logic        uart_tx_en;
     logic        uart_tx_busy;
@@ -77,12 +85,24 @@ module tb_soc (
     logic [31:0] imem [0:4095];
     logic [31:0] dmem [0:4095];
 
+    // dmem port is normally the core's; while the debug UART is
+    // servicing WRITE_MEM/READ_MEM (dbg_mem_valid), it takes over
+    // instead -- see fpga/riscv_top.sv for the hardware equivalent.
+    logic [31:0] dmem_addr_b;
+    logic [31:0] dmem_wdata_b;
+    logic        dmem_we_b;
+
+    assign dmem_addr_b  = dbg_mem_valid ? dbg_mem_addr  : dmem_addr;
+    assign dmem_wdata_b = dbg_mem_valid ? dbg_mem_wdata : dmem_wdata;
+    assign dmem_we_b    = dbg_mem_valid ? dbg_mem_we    : (dmem_we && bram_sel);
+    assign dbg_mem_rdata = bram_rd_data;
+
     assign imem_rdata  = imem[imem_addr[13:2]];
-    assign bram_rd_data = dmem[dmem_addr[13:2]];
+    assign bram_rd_data = dmem[dmem_addr_b[13:2]];
 
     always_ff @(posedge clk) begin
-        if (dmem_we && bram_sel)
-            dmem[dmem_addr[13:2]] <= dmem_wdata;
+        if (dmem_we_b)
+            dmem[dmem_addr_b[13:2]] <= dmem_wdata_b;
     end
 
     // UART
@@ -138,6 +158,11 @@ module tb_soc (
         .dbg_reg_addr (dbg_reg_addr),
         .dbg_reg_data (dbg_reg_data),
         .pc_dbg       (pc_dbg),
+        .dbg_mem_addr  (dbg_mem_addr),
+        .dbg_mem_wdata (dbg_mem_wdata),
+        .dbg_mem_we    (dbg_mem_we),
+        .dbg_mem_valid (dbg_mem_valid),
+        .dbg_mem_rdata (dbg_mem_rdata),
         .halt         (halt)
     );
 
