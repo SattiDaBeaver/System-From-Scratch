@@ -6,7 +6,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from utils import reset, run_cycles, load_imem, read_reg, assemble
+from utils import reset, load_imem, read_reg, assemble, await_pc_convergence
 
 # Store DUT state after running so individual tests can check it
 _reg_values = {}
@@ -20,7 +20,12 @@ async def run_program(dut):
     load_imem(dut, words)
 
     await reset(dut)
-    await run_cycles(dut, 100)
+    # riscv_core.sv is the 5-stage pipeline (docs/04_pipeline_plan.md) --
+    # a fixed 100-cycle budget assumed single-cycle latency and no longer
+    # reliably covers RAW stalls/flush bubbles. Wait for pc to settle into
+    # its steady-state period-3 loop-label bounce instead (milestone 7,
+    # see docs/04_pipeline_plan.md Sec.7).
+    await await_pc_convergence(dut, dut.pc_dbg, period=3)
 
     # Snapshot all registers
     for reg in range(5, 31):

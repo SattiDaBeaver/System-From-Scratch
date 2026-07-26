@@ -64,10 +64,16 @@ async def test_halt_step_resume(dut):
 
     words = assemble("test_basic.asm")
     load_imem(dut, words)
+    loop_pc = (len(words) - 1) * 4  # test_basic.asm's trailing `loop: j loop` word
 
     await reset(dut)
 
-    # Let x1-x4 compute and let the core settle into its trailing `loop: j loop`
+    # debug_uart.sv halts the core by default on reset (halt <= 1'b1) with
+    # no override in tb_soc (unlike fpga/riscv_top.sv's KEY[1]) -- so the
+    # core never executes a single instruction until RESUME is sent. Send
+    # it first, then let x1-x4 compute and the core settle into its
+    # trailing `loop: j loop`.
+    await dbg_send_byte(dut, CMD_RESUME)
     await run_cycles(dut, 20)
 
     # ── HALT ──────────────────────────────────────────
@@ -100,10 +106,22 @@ async def test_halt_step_resume(dut):
     # Sending one command byte over the debug UART takes ~10 * clk_per_bit
     # core cycles -- far longer than this 4-instruction program takes to
     # run, so by the time HALT actually lands, the core is already parked
-    # on `loop: j loop` (pc_before_halt == 0x10). Single-stepping a
-    # self-jump correctly leaves PC unchanged each time.
-    expected_pc = pc_before_halt
-    for _ in range(3):
+    # on `loop: j loop` (pc_before_halt is somewhere in that self-loop).
+    #
+    # On the pipelined core (docs/04_pipeline_plan.md), STEP only frees
+    # `halt` for exactly one clk cycle (debug_uart.sv's STEP_ASSERT ->
+    # STEP_DEASSERT) -- one pipeline-register update, not one full
+    # instruction's worth of latency. A self-jump doesn't resolve until it
+    # reaches EX (2 register stages after fetch), so pc walks through the
+    # same predict-not-taken period-3 bounce the differential harness's
+    # await_pc_convergence() already relies on elsewhere: each STEP
+    # advances pc from whichever of {loop_pc, loop_pc+4, loop_pc+8} it's
+    # currently on to the next phase in that fixed cycle, wrapping back
+    # to loop_pc after loop_pc+8.
+    phase_idx = (pc_before_halt - loop_pc) // 4
+    assert phase_idx in (0, 1, 2), f"pc_before_halt 0x{pc_before_halt:08x} not in self-loop bounce"
+    step_pattern = [loop_pc + ((phase_idx + i) % 3) * 4 for i in range(1, 4)]
+    for expected_pc in step_pattern:
         await dbg_send_byte(dut, CMD_STEP)
         await run_cycles(dut, 3)
 
@@ -120,10 +138,14 @@ async def test_halt_step_resume(dut):
     # ── RESUME — core should run freely again ──
     await dbg_send_byte(dut, CMD_RESUME)
     await run_cycles(dut, 20)
-    # Still parked on the self-loop -- PC should be exactly where it was.
+    # Running freely, pc is somewhere in the same period-3 loop bounce --
+    # not necessarily back at pc_before_halt exactly (depends which of
+    # the 3 phases 20 more cycles landed on).
     resumed_pc = dut.u_core.pc.value.to_unsigned()
-    assert resumed_pc == expected_pc, (
-        f"core did not resume correctly: pc = 0x{resumed_pc:08x}, expected 0x{expected_pc:08x}"
+    bounce = [loop_pc, loop_pc + 4, loop_pc + 8]
+    assert resumed_pc in bounce, (
+        f"core did not resume into the expected self-loop bounce: "
+        f"pc = 0x{resumed_pc:08x}, expected one of {[hex(p) for p in bounce]}"
     )
 
     cocotb.log.info("Debug UART halt/step/read/resume cycle PASSED")

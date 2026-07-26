@@ -8,6 +8,17 @@
 #     the program UART and the debug UART
 #   - KEY[1] acts as a manual override that always un-halts the core,
 #     regardless of what the debug UART's HALT command says
+#
+# tb_top's CORE_TYPE parameter (mirrors fpga/riscv_top.sv) picks which core
+# gets elaborated -- "PIPELINED" (default) or "SINGLE_CYCLE". This whole
+# suite runs unchanged against either, since riscv_top's wrapper logic
+# doesn't care which core is behind it -- except test_single_cycle_core_smoke
+# below, which is only meaningful when the suite is invoked with
+# CORE_TYPE=SINGLE_CYCLE (`make sim TOPLEVEL=tb_top MODULE=testbench.test_top
+# CORE_TYPE=SINGLE_CYCLE`); cocotb can't introspect the elaborated Verilog
+# parameter value from Python, so it can't self-skip when the wrong core is
+# built -- treat "run the whole file twice, once per CORE_TYPE" as the full
+# regression matrix for this testbench.
 
 import cocotb
 from cocotb.clock import Clock
@@ -46,8 +57,12 @@ def set_key(dut, idx, bit):
 
 
 async def reset_top(dut, cycles=10):
-    set_key(dut, 0, 0)  # active-low reset asserted
-    set_key(dut, 1, 1)  # halt override inactive (core allowed to run)
+    dut.KEY.value = 0b10  # KEY[0]=0 (active-low reset asserted), KEY[1]=1
+                          # (halt override inactive) -- set together, since
+                          # two sequential set_key() calls would race: each
+                          # reads dut.KEY.value before the other's write has
+                          # taken effect in the same timestep, so the second
+                          # call would silently clobber the first.
     dut.SW.value = 0
     dut.ext_rx.value = 1
     for _ in range(cycles):
@@ -154,9 +169,9 @@ async def test_halt_override(dut):
     # core should actually stop.
     await dbg_send_byte(dut, CMD_HALT)
     await ClockCycles(dut.CLOCK_50, 10)
-    pc_before = dut.u_core.pc.value.to_unsigned()
+    pc_before = dut.g_core.u_core.pc.value.to_unsigned()
     await ClockCycles(dut.CLOCK_50, 100)
-    pc_after = dut.u_core.pc.value.to_unsigned()
+    pc_after = dut.g_core.u_core.pc.value.to_unsigned()
     assert pc_after == pc_before, (
         f"core advanced while halted (KEY[1]=1): 0x{pc_before:08x} -> 0x{pc_after:08x}"
     )
@@ -165,9 +180,45 @@ async def test_halt_override(dut):
     # again even though the debug UART never got a RESUME.
     set_key(dut, 1, 0)
     await ClockCycles(dut.CLOCK_50, 100)
-    pc_override = dut.u_core.pc.value.to_unsigned()
+    pc_override = dut.g_core.u_core.pc.value.to_unsigned()
     assert pc_override != pc_before, (
         f"KEY[1] override did not un-halt the core: PC stuck at 0x{pc_before:08x}"
     )
 
     cocotb.log.info("Halt override PASSED")
+
+
+@cocotb.test()
+async def test_single_cycle_core_smoke(dut):
+    """Smoke-check that riscv_top's wrapper logic works unchanged when
+    CORE_TYPE=SINGLE_CYCLE picks the frozen golden-model core instead of the
+    pipelined one -- only meaningful under that build (see module docstring);
+    with the default CORE_TYPE=PIPELINED this just re-covers test_basic.asm
+    against the pipelined core's predict-not-taken self-loop bounce."""
+    cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
+    await reset_top(dut)
+
+    words = assemble("test_basic.asm")
+    load_program(dut, words)
+    loop_pc = (len(words) - 1) * 4  # test_basic.asm's trailing `loop: j loop` word
+
+    # debug_uart.sv halts the core on reset by default (halt <= 1'b1) --
+    # with no RESUME, it never executes a single instruction (see
+    # test_debugger.py). Pulling KEY[1] low forces the core to run
+    # regardless (same override test_halt_override exercises), which is
+    # far cheaper here than round-tripping a RESUME over the debug UART.
+    set_key(dut, 1, 0)
+    await ClockCycles(dut.CLOCK_50, 200)
+
+    # Unlike the pipelined core (which bounces around loop_pc/+4/+8 because
+    # a self-jump doesn't resolve until EX -- see test_debugger.py), the
+    # single-cycle core resolves the jump same-cycle, so pc parks exactly on
+    # loop_pc with no bounce.
+    pc = dut.g_core.u_core.pc.value.to_unsigned()
+    phase_idx = (pc - loop_pc) // 4
+    assert phase_idx in (0, 1, 2), (
+        f"core did not settle into test_basic.asm's trailing self-loop: "
+        f"pc=0x{pc:08x}, loop_pc=0x{loop_pc:08x}"
+    )
+
+    cocotb.log.info("Single-cycle core smoke PASSED")

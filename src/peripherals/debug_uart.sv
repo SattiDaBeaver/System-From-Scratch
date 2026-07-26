@@ -96,6 +96,17 @@ module debug_uart #(
     logic [1:0]  rx_byte_idx; // byte within mem_addr/mem_wdata, 0 = LSB
     logic        mem_is_write;
 
+    // Multi-byte commands (WAIT_ARG, RECV_MEM_ADDR, RECV_MEM_DATA) assemble
+    // their argument one UART byte at a time with no upper bound on how
+    // long that can take. A single dropped/garbled byte on the wire (e.g.
+    // a marginal RX sample) then leaves the FSM waiting forever for a byte
+    // that's never coming -- permanently wedging the debugger until a
+    // fresh HALT/reset. rx_timeout_cnt aborts back to CMD_IDLE instead if
+    // too many clocks pass without a new byte, so a glitch costs one
+    // command retry rather than the whole session.
+    localparam int TIMEOUT_BIT_PERIODS = 20;
+    logic [31:0] rx_timeout_cnt;
+
     logic        rx_done;
     logic [7:0]  rx_data;
     logic        tx_en;
@@ -106,7 +117,7 @@ module debug_uart #(
         .CLK_BITS    (CLK_BITS),
         .DATA_WIDTH  (8),
         .PARITY_BITS (0),
-        .STOP_BITS   (1)
+        .STOP_BITS   (2)
     ) u_dbg_uart (
         .clk            (clk),
         .rst            (rst),
@@ -151,9 +162,15 @@ module debug_uart #(
             mem_wdata    <= 32'd0;
             rx_byte_idx  <= 2'd0;
             mem_is_write <= 1'b0;
+            rx_timeout_cnt <= 32'd0;
         end
         else begin
             tx_en <= 1'b0; // default; pulsed high explicitly below
+
+            // Multi-byte commands reset the counter on entry/each received
+            // byte below; any other cycle just lets it free-run so it's
+            // always ticking while genuinely waiting on rx_done.
+            rx_timeout_cnt <= rx_timeout_cnt + 32'd1;
 
             case (state)
                 CMD_IDLE: begin
@@ -162,7 +179,10 @@ module debug_uart #(
                             CMD_HALT:     halt <= 1'b1;
                             CMD_RESUME:   halt <= 1'b0;
                             CMD_STEP:     state <= STEP_ASSERT;
-                            CMD_READ_REG: state <= WAIT_ARG;
+                            CMD_READ_REG: begin
+                                rx_timeout_cnt <= 32'd0;
+                                state          <= WAIT_ARG;
+                            end
                             CMD_READ_PC: begin
                                 word_sel   <= 6'd32;
                                 word_count <= 6'd1;
@@ -179,16 +199,18 @@ module debug_uart #(
                                 // never write memory out from under a
                                 // running program.
                                 if (halt) begin
-                                    mem_is_write <= 1'b1;
-                                    rx_byte_idx  <= 2'd0;
-                                    state        <= RECV_MEM_ADDR;
+                                    mem_is_write   <= 1'b1;
+                                    rx_byte_idx    <= 2'd0;
+                                    rx_timeout_cnt <= 32'd0;
+                                    state          <= RECV_MEM_ADDR;
                                 end
                             end
                             CMD_READ_MEM: begin
                                 if (halt) begin
-                                    mem_is_write <= 1'b0;
-                                    rx_byte_idx  <= 2'd0;
-                                    state        <= RECV_MEM_ADDR;
+                                    mem_is_write   <= 1'b0;
+                                    rx_byte_idx    <= 2'd0;
+                                    rx_timeout_cnt <= 32'd0;
+                                    state          <= RECV_MEM_ADDR;
                                 end
                             end
                             default: ; // ignore unknown command byte
@@ -201,6 +223,9 @@ module debug_uart #(
                         word_sel   <= {1'b0, rx_data[4:0]}; // clamp to 0-31
                         word_count <= 6'd1;
                         state      <= SEND_LOAD;
+                    end
+                    else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
+                        state <= CMD_IDLE; // arg byte never arrived -- give up and re-sync
                     end
                 end
 
@@ -259,6 +284,7 @@ module debug_uart #(
                 RECV_MEM_ADDR: begin
                     if (rx_done) begin
                         mem_addr[8*rx_byte_idx +: 8] <= rx_data;
+                        rx_timeout_cnt <= 32'd0;
                         if (rx_byte_idx == 2'd3) begin
                             rx_byte_idx <= 2'd0;
                             state       <= mem_is_write ? RECV_MEM_DATA : MEM_READ_WAIT;
@@ -267,6 +293,9 @@ module debug_uart #(
                             rx_byte_idx <= rx_byte_idx + 2'd1;
                         end
                     end
+                    else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
+                        state <= CMD_IDLE; // stalled mid-address -- give up and re-sync
+                    end
                 end
 
                 // WRITE_MEM only: assemble the 4-byte little-endian data
@@ -274,6 +303,7 @@ module debug_uart #(
                 RECV_MEM_DATA: begin
                     if (rx_done) begin
                         mem_wdata[8*rx_byte_idx +: 8] <= rx_data;
+                        rx_timeout_cnt <= 32'd0;
                         if (rx_byte_idx == 2'd3) begin
                             rx_byte_idx <= 2'd0;
                             state       <= MEM_WRITE_PULSE;
@@ -281,6 +311,9 @@ module debug_uart #(
                         else begin
                             rx_byte_idx <= rx_byte_idx + 2'd1;
                         end
+                    end
+                    else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
+                        state <= CMD_IDLE; // stalled mid-data -- give up and re-sync
                     end
                 end
 

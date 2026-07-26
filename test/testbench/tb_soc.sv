@@ -110,7 +110,7 @@ module tb_soc (
         .CLK_BITS    (16),
         .DATA_WIDTH  (8),
         .PARITY_BITS (0),
-        .STOP_BITS   (1)
+        .STOP_BITS   (2)
     ) u_uart (
         .clk            (clk),
         .rst            (rst),

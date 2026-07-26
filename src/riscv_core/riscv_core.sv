@@ -3,7 +3,7 @@ module riscv_core #(
 ) (
     input  logic        clk,
     input  logic        rst,        // Active high
-    input  logic        halt,       // Active high — freezes PC and regfile writes
+    input  logic        halt,       // Active high — freezes every pipeline stage and regfile writes
 
     // Instruction memory interface (read only)
     output logic [31:0] imem_addr,
@@ -18,7 +18,7 @@ module riscv_core #(
 
     // Debug interface (read only, no effect on core behavior)
     // Async indexed read instead of exposing the full regfile as a packed
-    // array port 
+    // array port
     input  logic [4:0]  dbg_reg_addr,
     output logic [31:0] dbg_reg_data,
     output logic [31:0] pc_dbg,
@@ -27,18 +27,27 @@ module riscv_core #(
     input  logic        _bogus
 );
 
+    // 5-stage pipeline: IF -> ID -> EX -> MEM -> WB. See docs/03_microarchitecture.md
+    // and docs/04_pipeline_plan.md for the derivation/plan this follows.
+    //
+    // Milestone 2 (docs/04_pipeline_plan.md Sec.7): pipeline registers +
+    // valid-bit reset gating only. No RAW-hazard stalling, no branch/jump
+    // flush yet -- next_pc redirection exists (any program with a jump has
+    // to be able to loop), but if_id/id_ex are NOT squashed on redirect, so
+    // for two cycles after a taken branch/jump the wrong-path instructions
+    // already in IF/ID flow through anyway. That's safe for now only
+    // because every test program's post-loop imem is zero-filled (decodes
+    // as addi x0,x0,0 -- a real no-op since rd=x0), not because it's
+    // correct in general; flush logic (milestone 3) replaces this.
+
     //*************************************
     //*             Wires                 *
     //*************************************
     //********** Register File ************
-    // Wires
     logic [31:0] wr_data;
     logic        wr_en;
     logic [31:0] src1_value;
     logic [31:0] src2_value;
-
-    // Branch/jump targets
-    logic        taken_br;
 
     //********** Decoder Logic ************
     logic [31:0] instr;
@@ -75,48 +84,175 @@ module riscv_core #(
 
     logic [10:0] dec_bits;
 
-    //******* Arithmetic Logic Unit *******
-    logic [31:0] sltu_rslt;
-    logic [31:0] sltiu_rslt;
-    logic [63:0] sext_src1;
-    logic [63:0] sra_rslt;
-    logic [63:0] srai_rslt;
-    logic [31:0] result;
-
     //********* Program Counter ***********
-    // Wires
     logic [31:0] pc;
     logic [31:0] next_pc;
 
-    // Special cases
-    logic [31:0] br_tgt_pc;
-    logic [31:0] jalr_tgt_pc;
+    //*************************************
+    //*      Pipeline registers           *
+    //*************************************
+    // IF/ID: raw fetched instruction + its own pc, so ID can decode and EX
+    // can still compute pc-relative targets (br_tgt/auipc/jal) later.
+    logic [31:0] if_id_instr;
+    logic [31:0] if_id_pc;
+    logic        if_id_valid;
 
+    // ID/EX: decode already happened in ID -- carry its *outputs* forward
+    // (one-hot control bits packed into id_ctrl_bus, matching this file's
+    // existing one-hot-boolean decode style) rather than redecoding in EX.
+    // Bit order (MSB..LSB), 32 bits total:
+    //   is_lui, is_auipc, is_jal, is_jalr,
+    //   is_beq, is_bne, is_blt, is_bge, is_bltu, is_bgeu,
+    //   is_addi, is_slti, is_sltiu, is_xori, is_ori, is_andi,
+    //   is_slli, is_srli, is_srai,
+    //   is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and,
+    //   is_load, is_s_instr, rd_valid
+    logic [31:0] id_ctrl_bus;
+    logic [4:0]  id_ex_rd;
+    logic [31:0] id_ex_ctrl;
+    logic [31:0] id_ex_imm;
+    logic [31:0] id_ex_src1_value;
+    logic [31:0] id_ex_src2_value;
+    logic [31:0] id_ex_pc;
+    logic        id_ex_valid;
+
+    // EX/MEM: result is the ALU result (loads/stores use it as the address,
+    // everything else as the value to forward to WB). wr_en is precomputed
+    // here (rd_valid && rd!=x0) rather than recomputed per-stage downstream.
+    logic [31:0] ex_mem_result;
+    logic [31:0] ex_mem_src2_value;
+    logic [4:0]  ex_mem_rd;
+    logic        ex_mem_is_load;
+    logic        ex_mem_is_s_instr;
+    logic        ex_mem_wr_en;
+    logic        ex_mem_valid;
+
+    // MEM/WB: wr_data is already resolved to "ld_data or forwarded result"
+    // -- WB just commits it.
+    logic [31:0] mem_wb_wr_data;
+    logic [4:0]  mem_wb_rd;
+    logic        mem_wb_wr_en;
+    logic        mem_wb_valid;
+
+    //*************************************
+    //*     EX-stage (unpacked) control    *
+    //*************************************
+    logic ex_is_lui, ex_is_auipc, ex_is_jal, ex_is_jalr;
+    logic ex_is_beq, ex_is_bne, ex_is_blt, ex_is_bge, ex_is_bltu, ex_is_bgeu;
+    logic ex_is_addi, ex_is_slti, ex_is_sltiu, ex_is_xori, ex_is_ori, ex_is_andi;
+    logic ex_is_slli, ex_is_srli, ex_is_srai;
+    logic ex_is_add, ex_is_sub, ex_is_sll, ex_is_slt, ex_is_sltu, ex_is_xor, ex_is_srl, ex_is_sra, ex_is_or, ex_is_and;
+    logic ex_is_load, ex_is_s_instr, ex_rd_valid;
+
+    logic        ex_taken_br;
+    logic [31:0] ex_br_tgt_pc;
+    logic [31:0] ex_jalr_tgt_pc;
+    logic [31:0] ex_sltu_rslt;
+    logic [31:0] ex_sltiu_rslt;
+    logic [63:0] ex_sext_src1;
+    logic [63:0] ex_sra_rslt;
+    logic [63:0] ex_srai_rslt;
+    logic [31:0] ex_result;
+    logic        ex_wr_en;
+
+    //*************************************
+    //*      MEM-stage wires               *
+    //*************************************
+    logic [31:0] mem_wr_data;
+
+    //*************************************
+    //*      Flush (milestone 3)          *
+    //*************************************
+    // A taken branch/jal/jalr resolves in EX -- by then IF and ID have
+    // already fetched/decoded the two sequential (wrong-path) instructions
+    // immediately after it. flush squashes both the instruction just
+    // latched into if_id (still needs decoding) and the one already sitting
+    // in id_ex (about to enter EX this same cycle) into invalid bubbles, the
+    // same cycle next_pc redirects IF. See docs/03_microarchitecture.md
+    // Sec.3.
+    logic ex_flush;
+    assign ex_flush = ex_taken_br || ex_is_jal || ex_is_jalr;
+
+    //*************************************
+    //*  RAW-hazard stall (milestone 4)   *
+    //*************************************
+    // Stall-only v1, no forwarding (docs/04_pipeline_plan.md Sec.3): if the
+    // instruction currently in ID reads a register that an instruction
+    // still in flight (id_ex/ex_mem/mem_wb) is going to write, hold IF/ID
+    // in place and feed EX a bubble instead, until that write has
+    // committed. Load-use is not a special case -- a load's result isn't
+    // available until mem_wb, exactly like any ALU result, so this same
+    // check covers it.
+    logic id_stall;
+    assign id_stall = if_id_valid && !ex_flush && (
+        (rs1_valid && rs1 != 5'b0 && (
+            (id_ex_valid  && ex_wr_en     && id_ex_rd  == rs1) ||
+            (ex_mem_valid && ex_mem_wr_en && ex_mem_rd == rs1) ||
+            (mem_wb_valid && mem_wb_wr_en && mem_wb_rd == rs1)
+        )) ||
+        (rs2_valid && rs2 != 5'b0 && (
+            (id_ex_valid  && ex_wr_en     && id_ex_rd  == rs2) ||
+            (ex_mem_valid && ex_mem_wr_en && ex_mem_rd == rs2) ||
+            (mem_wb_valid && mem_wb_wr_en && mem_wb_rd == rs2)
+        ))
+    );
 
     //*************************************
     //*             Logic                 *
     //*************************************
-    //********** Register File ************
-    // assign next_pc = 
-    //     taken_br    ? br_tgt_pc :
-    //     is_jal      ? br_tgt_pc :
-    //     is_jalr     ? jalr_tgt_pc :
-    //     pc + 32'd4; // default
+    //*************  IF stage  ************
+    assign imem_addr = pc;
 
     always_ff @(posedge clk or posedge rst) begin : ProgramCounter
         if (rst) begin
             pc <= 32'b0;
         end
         else if (!halt) begin
-            if (taken_br || is_jal) pc <= br_tgt_pc;
-            else if (is_jalr)       pc <= jalr_tgt_pc;
-            else                    pc <= pc + 32'd4;
+            if (id_stall) begin
+                pc <= pc;
+            end
+            else begin
+                pc <= next_pc;
+            end
         end
     end
 
-    //******** Instruction Memory *********
-    assign imem_addr    = pc;
-    assign instr        = imem_rdata;
+    // Driven by EX's branch/jump resolution -- IF always optimistically
+    // fetches pc+4 by default (predict-not-taken) and gets redirected the
+    // same cycle EX resolves otherwise. See docs/03_microarchitecture.md
+    // Sec.3.
+    assign next_pc =
+        (ex_taken_br || ex_is_jal) ? ex_br_tgt_pc :
+        ex_is_jalr                 ? ex_jalr_tgt_pc :
+        pc + 32'd4;
+
+    always_ff @(posedge clk) begin : IF_ID_Reg
+        if (rst) begin
+            if_id_instr <= 32'b0;
+            if_id_pc    <= 32'b0;
+            if_id_valid <= 1'b0;
+        end
+        else if (!halt) begin
+            if (ex_flush) begin
+                if_id_instr <= 32'b0;
+                if_id_pc    <= 32'b0;
+                if_id_valid <= 1'b0;
+            end
+            else if (id_stall) begin
+                if_id_instr <= if_id_instr;
+                if_id_pc    <= if_id_pc;
+                if_id_valid <= if_id_valid;
+            end
+            else begin
+                if_id_instr <= imem_rdata;
+                if_id_pc    <= pc;
+                if_id_valid <= 1'b1;
+            end
+        end
+    end
+
+    //*************  ID stage  ************
+    assign instr = if_id_instr;
 
     always_comb begin : Decoder_Logic
         is_u_instr = 1'b0;
@@ -142,7 +278,6 @@ module riscv_core #(
         endcase
     end
 
-    //******** Instruction Fields *********
     assign rs1      = instr[19:15];
     assign rs2      = instr[24:20];
     assign funct3   = instr[14:12];
@@ -155,15 +290,14 @@ module riscv_core #(
     assign rd_valid     = is_r_instr || is_i_instr || is_u_instr || is_j_instr;
     assign imm_valid    = is_i_instr || is_s_instr || is_b_instr || is_u_instr || is_j_instr;
 
-    assign imm = 
+    assign imm =
         is_i_instr ? {{21{instr[31]}}, instr[30:20]} :
         is_s_instr ? {{21{instr[31]}}, instr[30:25], instr[11:7]} :
         is_u_instr ? {instr[31:12], 12'b0} :
         is_b_instr ? {{20{instr[31]}}, instr[7], instr[30:25], instr[11:8], 1'b0} :
         is_j_instr ? {{12{instr[31]}}, instr[19:12], instr[20], instr[30:25], instr[24:21], 1'b0} :
-        32'b0; 
+        32'b0;
 
-    //*********** Instructions ************
     assign dec_bits = {instr[30], funct3, opcode};
 
     always_comb begin
@@ -200,7 +334,7 @@ module riscv_core #(
             11'b?_100_0010011: is_xori  = 1'b1;
             11'b?_110_0010011: is_ori   = 1'b1;
             11'b?_111_0010011: is_andi  = 1'b1;
-            // Shifts 
+            // Shifts
             11'b0_001_0010011: is_slli  = 1'b1;
             11'b0_101_0010011: is_srli  = 1'b1;
             11'b1_101_0010011: is_srai  = 1'b1;
@@ -221,83 +355,183 @@ module riscv_core #(
         endcase
     end
 
-    //******* Arithmetic Logic Unit *******
+    // Register file read -- async, same as before (no forwarding yet: a
+    // RAW hazard here silently reads a stale value until milestone 4 adds
+    // stall detection. Milestone-2 test programs avoid dependent
+    // instructions specifically because of this.)
+    assign src1_value = (rs1 == 5'b0) ? 32'b0 : regfile[rs1];
+    assign src2_value = (rs2 == 5'b0) ? 32'b0 : regfile[rs2];
+
+    assign id_ctrl_bus = {
+        is_lui, is_auipc, is_jal, is_jalr,
+        is_beq, is_bne, is_blt, is_bge, is_bltu, is_bgeu,
+        is_addi, is_slti, is_sltiu, is_xori, is_ori, is_andi,
+        is_slli, is_srli, is_srai,
+        is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and,
+        is_load, is_s_instr, rd_valid
+    };
+
+    always_ff @(posedge clk) begin : ID_EX_Reg
+        if (rst) begin
+            id_ex_rd         <= 5'b0;
+            id_ex_ctrl        <= 32'b0;
+            id_ex_imm         <= 32'b0;
+            id_ex_src1_value  <= 32'b0;
+            id_ex_src2_value  <= 32'b0;
+            id_ex_pc          <= 32'b0;
+            id_ex_valid       <= 1'b0;
+        end
+        else if (!halt) begin
+            if (ex_flush) begin
+                id_ex_rd         <= 5'b0;
+                id_ex_ctrl        <= 32'b0;
+                id_ex_imm         <= 32'b0;
+                id_ex_src1_value  <= 32'b0;
+                id_ex_src2_value  <= 32'b0;
+                id_ex_pc          <= 32'b0;
+                id_ex_valid       <= 1'b0;
+            end
+            else if (id_stall) begin
+                // The dependent instruction stays parked in if_id (held
+                // above); EX gets a bubble instead of a second copy of
+                // whatever's already in id_ex.
+                id_ex_rd         <= 5'b0;
+                id_ex_ctrl        <= 32'b0;
+                id_ex_imm         <= 32'b0;
+                id_ex_src1_value  <= 32'b0;
+                id_ex_src2_value  <= 32'b0;
+                id_ex_pc          <= 32'b0;
+                id_ex_valid       <= 1'b0;
+            end
+            else begin
+                id_ex_rd         <= rd;
+                id_ex_ctrl        <= id_ctrl_bus;
+                id_ex_imm         <= imm;
+                id_ex_src1_value  <= src1_value;
+                id_ex_src2_value  <= src2_value;
+                id_ex_pc          <= if_id_pc;
+                id_ex_valid       <= if_id_valid;
+            end
+        end
+    end
+
+    //*************  EX stage  ************
+    assign {
+        ex_is_lui, ex_is_auipc, ex_is_jal, ex_is_jalr,
+        ex_is_beq, ex_is_bne, ex_is_blt, ex_is_bge, ex_is_bltu, ex_is_bgeu,
+        ex_is_addi, ex_is_slti, ex_is_sltiu, ex_is_xori, ex_is_ori, ex_is_andi,
+        ex_is_slli, ex_is_srli, ex_is_srai,
+        ex_is_add, ex_is_sub, ex_is_sll, ex_is_slt, ex_is_sltu, ex_is_xor, ex_is_srl, ex_is_sra, ex_is_or, ex_is_and,
+        ex_is_load, ex_is_s_instr, ex_rd_valid
+    } = id_ex_ctrl;
+
     // Set less than unsigned
-    assign sltu_rslt = {31'b0, src1_value < src2_value};
-    assign sltiu_rslt = {31'b0, src1_value < imm};
+    assign ex_sltu_rslt  = {31'b0, id_ex_src1_value < id_ex_src2_value};
+    assign ex_sltiu_rslt = {31'b0, id_ex_src1_value < id_ex_imm};
 
-    // Shift right arithmetic
-    // Sign extend
-    assign sext_src1 = {{32{src1_value[31]}}, src1_value};
-    // Shift sign-extended results
-    assign sra_rslt = sext_src1 >> src2_value[4:0];
-    assign srai_rslt = sext_src1 >> imm[4:0];
+    // Shift right arithmetic (sign-extend, then shift)
+    assign ex_sext_src1 = {{32{id_ex_src1_value[31]}}, id_ex_src1_value};
+    assign ex_sra_rslt  = ex_sext_src1 >> id_ex_src2_value[4:0];
+    assign ex_srai_rslt = ex_sext_src1 >> id_ex_imm[4:0];
 
-    // ALU result
-    assign result = 
-        is_andi    ? src1_value & imm               :
-        is_ori     ? src1_value | imm               :
-        is_xori    ? src1_value ^ imm               :
-        is_addi    ? src1_value + imm               :
-        is_slli    ? src1_value << imm[5:0]         :
-        is_srli    ? src1_value >> imm[5:0]         :
-        is_and     ? src1_value & src2_value        :
-        is_or      ? src1_value | src2_value        :
-        is_xor     ? src1_value ^ src2_value        :
-        is_add     ? src1_value + src2_value        :
-        is_sub     ? src1_value - src2_value        :
-        is_sll     ? src1_value << src2_value[4:0]  :
-        is_srl     ? src1_value >> src2_value[4:0]  :
-        is_sltu    ? sltu_rslt                      :
-        is_sltiu   ? sltiu_rslt                     :
-        is_lui     ? {imm[31:12], 12'b0}            :
-        is_auipc   ? pc + imm                       :
-        is_jal     ? pc + 32'd4                     :
-        is_jalr    ? pc + 32'd4                     :
-        is_slt     ? ((src1_value[31] == src2_value[31]) ? sltu_rslt : {31'b0, src1_value[31]}) :
-        is_slti    ? ((src1_value[31] == imm[31]) ? sltiu_rslt : {31'b0, src1_value[31]}) :
-        is_sra     ? sra_rslt[31:0]                 :
-        is_srai    ? srai_rslt[31:0]                :
-        is_load    ? src1_value + imm               :
-        is_s_instr ? src1_value + imm               :
+    assign ex_result =
+        ex_is_andi    ? id_ex_src1_value & id_ex_imm               :
+        ex_is_ori     ? id_ex_src1_value | id_ex_imm               :
+        ex_is_xori    ? id_ex_src1_value ^ id_ex_imm               :
+        ex_is_addi    ? id_ex_src1_value + id_ex_imm               :
+        ex_is_slli    ? id_ex_src1_value << id_ex_imm[5:0]         :
+        ex_is_srli    ? id_ex_src1_value >> id_ex_imm[5:0]         :
+        ex_is_and     ? id_ex_src1_value & id_ex_src2_value        :
+        ex_is_or      ? id_ex_src1_value | id_ex_src2_value        :
+        ex_is_xor     ? id_ex_src1_value ^ id_ex_src2_value        :
+        ex_is_add     ? id_ex_src1_value + id_ex_src2_value        :
+        ex_is_sub     ? id_ex_src1_value - id_ex_src2_value        :
+        ex_is_sll     ? id_ex_src1_value << id_ex_src2_value[4:0]  :
+        ex_is_srl     ? id_ex_src1_value >> id_ex_src2_value[4:0]  :
+        ex_is_sltu    ? ex_sltu_rslt                                :
+        ex_is_sltiu   ? ex_sltiu_rslt                               :
+        ex_is_lui     ? {id_ex_imm[31:12], 12'b0}                   :
+        ex_is_auipc   ? id_ex_pc + id_ex_imm                        :
+        ex_is_jal     ? id_ex_pc + 32'd4                            :
+        ex_is_jalr    ? id_ex_pc + 32'd4                            :
+        ex_is_slt     ? ((id_ex_src1_value[31] == id_ex_src2_value[31]) ? ex_sltu_rslt : {31'b0, id_ex_src1_value[31]}) :
+        ex_is_slti    ? ((id_ex_src1_value[31] == id_ex_imm[31]) ? ex_sltiu_rslt : {31'b0, id_ex_src1_value[31]}) :
+        ex_is_sra     ? ex_sra_rslt[31:0]                           :
+        ex_is_srai    ? ex_srai_rslt[31:0]                          :
+        ex_is_load    ? id_ex_src1_value + id_ex_imm                :
+        ex_is_s_instr ? id_ex_src1_value + id_ex_imm                :
         32'b0;
 
-    //********** Register File ************
-    // Register file write
-    assign wr_data = is_load ? ld_data : result;
-    assign wr_en   = (rd == 5'b0) ? 1'b0 : rd_valid;
+    assign ex_wr_en = (id_ex_rd == 5'b0) ? 1'b0 : ex_rd_valid;
 
-    // Branch logic
-    assign taken_br =
-        is_beq  ? (src1_value == src2_value)                                :
-        is_bne  ? (src1_value != src2_value)                                :
-        is_blt  ? ((src1_value < src2_value) ^ (src1_value[31] != src2_value[31])) :
-        is_bge  ? ((src1_value >= src2_value) ^ (src1_value[31] != src2_value[31])) :
-        is_bltu ? (src1_value < src2_value)                                 :
-        is_bgeu ? (src1_value >= src2_value)                                :
+    assign ex_taken_br =
+        ex_is_beq  ? (id_ex_src1_value == id_ex_src2_value)                                        :
+        ex_is_bne  ? (id_ex_src1_value != id_ex_src2_value)                                         :
+        ex_is_blt  ? ((id_ex_src1_value < id_ex_src2_value) ^ (id_ex_src1_value[31] != id_ex_src2_value[31])) :
+        ex_is_bge  ? ((id_ex_src1_value >= id_ex_src2_value) ^ (id_ex_src1_value[31] != id_ex_src2_value[31])) :
+        ex_is_bltu ? (id_ex_src1_value < id_ex_src2_value)                                          :
+        ex_is_bgeu ? (id_ex_src1_value >= id_ex_src2_value)                                         :
         1'b0;
 
-    assign br_tgt_pc   = pc + imm;
-    assign jalr_tgt_pc = src1_value + imm;
+    assign ex_br_tgt_pc   = id_ex_pc + id_ex_imm;
+    assign ex_jalr_tgt_pc = id_ex_src1_value + id_ex_imm;
 
-    // Data memory interface
-    assign dmem_addr  = result;        // address computed by ALU
-    assign dmem_wdata = src2_value;    // rs2 is always the store data
-    assign dmem_we    = is_s_instr;
-    assign dmem_re    = is_load;
+    always_ff @(posedge clk) begin : EX_MEM_Reg
+        if (rst) begin
+            ex_mem_result      <= 32'b0;
+            ex_mem_src2_value  <= 32'b0;
+            ex_mem_rd          <= 5'b0;
+            ex_mem_is_load     <= 1'b0;
+            ex_mem_is_s_instr  <= 1'b0;
+            ex_mem_wr_en       <= 1'b0;
+            ex_mem_valid       <= 1'b0;
+        end
+        else if (!halt) begin
+            ex_mem_result      <= ex_result;
+            ex_mem_src2_value  <= id_ex_src2_value;
+            ex_mem_rd          <= id_ex_rd;
+            ex_mem_is_load     <= ex_is_load;
+            ex_mem_is_s_instr  <= ex_is_s_instr;
+            ex_mem_wr_en       <= ex_wr_en;
+            ex_mem_valid       <= id_ex_valid;
+        end
+    end
+
+    //*************  MEM stage  ***********
+    assign dmem_addr  = ex_mem_result;        // address computed by ALU
+    assign dmem_wdata = ex_mem_src2_value;    // rs2 is always the store data
+    assign dmem_we    = ex_mem_is_s_instr && ex_mem_valid;
+    assign dmem_re    = ex_mem_is_load && ex_mem_valid;
+
+    assign mem_wr_data = ex_mem_is_load ? ld_data : ex_mem_result;
+
+    always_ff @(posedge clk) begin : MEM_WB_Reg
+        if (rst) begin
+            mem_wb_wr_data <= 32'b0;
+            mem_wb_rd      <= 5'b0;
+            mem_wb_wr_en   <= 1'b0;
+            mem_wb_valid   <= 1'b0;
+        end
+        else if (!halt) begin
+            mem_wb_wr_data <= mem_wr_data;
+            mem_wb_rd      <= ex_mem_rd;
+            mem_wb_wr_en   <= ex_mem_wr_en;
+            mem_wb_valid   <= ex_mem_valid;
+        end
+    end
+
+    //*************  WB stage  ************
+    assign wr_data = mem_wb_wr_data;
+    assign wr_en   = mem_wb_wr_en;
 
     // Internal Register File
     logic [31:0] regfile [31:0];
 
     // Write port
     always_ff @(posedge clk) begin
-        if (wr_en && (rd != 5'b0) && !halt)
-            regfile[rd] <= wr_data;
+        if (wr_en && (mem_wb_rd != 5'b0) && mem_wb_valid && !halt)
+            regfile[mem_wb_rd] <= wr_data;
     end
-
-    // Read ports - x0 always 0
-    assign src1_value = (rs1 == 5'b0) ? 32'b0 : regfile[rs1];
-    assign src2_value = (rs2 == 5'b0) ? 32'b0 : regfile[rs2];
 
     // Debug interface
     assign dbg_reg_data = (dbg_reg_addr == 5'b0) ? 32'b0 : regfile[dbg_reg_addr];

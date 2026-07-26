@@ -1,12 +1,13 @@
-module riscv_core #(
+module riscv_core_single_cycle #(
     parameter ISA = "RV32I"     // For reference, not used in design
 ) (
     input  logic        clk,
     input  logic        rst,        // Active high
+    input  logic        halt,       // Active high — freezes PC and regfile writes
 
     // Instruction memory interface (read only)
     output logic [31:0] imem_addr,
-    input  logic [31:0] imem_rdata,   
+    input  logic [31:0] imem_rdata,
 
     // Data memory
     output logic [31:0] dmem_addr,
@@ -14,6 +15,13 @@ module riscv_core #(
     output logic        dmem_we,
     output logic        dmem_re,
     input  logic [31:0] ld_data,
+
+    // Debug interface (read only, no effect on core behavior)
+    // Async indexed read instead of exposing the full regfile as a packed
+    // array port 
+    input  logic [4:0]  dbg_reg_addr,
+    output logic [31:0] dbg_reg_data,
+    output logic [31:0] pc_dbg,
 
     // Junk wire
     input  logic        _bogus
@@ -95,13 +103,15 @@ module riscv_core #(
     //     is_jalr     ? jalr_tgt_pc :
     //     pc + 32'd4; // default
 
-    always_ff @(posedge clk) begin : ProgramCounter
-        if (rst)
+    always_ff @(posedge clk or posedge rst) begin : ProgramCounter
+        if (rst) begin
             pc <= 32'b0;
-        else
+        end
+        else if (!halt) begin
             if (taken_br || is_jal) pc <= br_tgt_pc;
             else if (is_jalr)       pc <= jalr_tgt_pc;
             else                    pc <= pc + 32'd4;
+        end
     end
 
     //******** Instruction Memory *********
@@ -281,12 +291,16 @@ module riscv_core #(
 
     // Write port
     always_ff @(posedge clk) begin
-        if (wr_en && (rd != 5'b0))
+        if (wr_en && (rd != 5'b0) && !halt)
             regfile[rd] <= wr_data;
     end
 
     // Read ports - x0 always 0
     assign src1_value = (rs1 == 5'b0) ? 32'b0 : regfile[rs1];
     assign src2_value = (rs2 == 5'b0) ? 32'b0 : regfile[rs2];
-    
+
+    // Debug interface
+    assign dbg_reg_data = (dbg_reg_addr == 5'b0) ? 32'b0 : regfile[dbg_reg_addr];
+    assign pc_dbg       = pc;
+
 endmodule

@@ -73,7 +73,7 @@ def main():
 
     # Open serial port
     try:
-        ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
+        ser = serial.Serial(args.port, args.baud, stopbits=serial.STOPBITS_TWO, timeout=args.timeout)
     except serial.SerialException as e:
         print(f"[ERROR] Could not open port {args.port}: {e}")
         sys.exit(1)

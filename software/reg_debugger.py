@@ -65,7 +65,7 @@ class RegDebugger:
             self.ser = _DryRunSerial(port, baud, timeout)
         else:
             import serial
-            self.ser = serial.Serial(port, baud, timeout=timeout)
+            self.ser = serial.Serial(port, baud, stopbits=serial.STOPBITS_TWO, timeout=timeout)
 
     def close(self):
         self.ser.close()

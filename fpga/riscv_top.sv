@@ -1,4 +1,14 @@
-module riscv_top (
+// CORE_TYPE selects which core RTL gets elaborated -- "PIPELINED" (default)
+// for the in-development 5-stage riscv_core, or "SINGLE_CYCLE" for the
+// frozen riscv_core_single_cycle golden model (see test/testbench/tb_diff.sv,
+// which already differential-fuzzes the two side by side). Both modules
+// share an identical port list, so this is a pure synthesis-time choice --
+// no other RTL in this file depends on which one is selected. Override via
+// Quartus's top-level parameter assignment (Assignment Editor, or
+// `set_parameter -name CORE_TYPE "SINGLE_CYCLE"` in the QSF) before compiling.
+module riscv_top #(
+    parameter CORE_TYPE = "PIPELINED"
+) (
     input  logic [9:0] SW,
     input  logic [1:0] KEY,
     input  logic       CLOCK_50,
@@ -229,7 +239,7 @@ module riscv_top (
         .CLK_BITS    (16),
         .DATA_WIDTH  (8),
         .PARITY_BITS (0),
-        .STOP_BITS   (1)
+        .STOP_BITS   (2)
     ) u_uart (
         .clk            (clk),
         .rst            (rst),
@@ -248,21 +258,43 @@ module riscv_top (
     // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
-    riscv_core u_core (
-        .clk        (clk),
-        .rst        (rst),
-        .halt       (halt & KEY[1]),
-        .imem_addr  (imem_addr),
-        .imem_rdata (imem_rdata),
-        .dmem_addr  (dmem_addr),
-        .dmem_wdata (dmem_wdata),
-        .dmem_we    (dmem_we),
-        .dmem_re    (dmem_re),
-        .ld_data    (ld_data),
-        .dbg_reg_addr(dbg_reg_addr),
-        .dbg_reg_data(dbg_reg_data),
-        .pc_dbg     (pc_dbg)
-    );
+    generate
+        if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
+            riscv_core_single_cycle u_core (
+                .clk        (clk),
+                .rst        (rst),
+                .halt       (halt & KEY[1]),
+                .imem_addr  (imem_addr),
+                .imem_rdata (imem_rdata),
+                .dmem_addr  (dmem_addr),
+                .dmem_wdata (dmem_wdata),
+                .dmem_we    (dmem_we),
+                .dmem_re    (dmem_re),
+                .ld_data    (ld_data),
+                .dbg_reg_addr(dbg_reg_addr),
+                .dbg_reg_data(dbg_reg_data),
+                .pc_dbg     (pc_dbg),
+                ._bogus     (1'b0)
+            );
+        end else begin : g_core
+            riscv_core u_core (
+                .clk        (clk),
+                .rst        (rst),
+                .halt       (halt & KEY[1]),
+                .imem_addr  (imem_addr),
+                .imem_rdata (imem_rdata),
+                .dmem_addr  (dmem_addr),
+                .dmem_wdata (dmem_wdata),
+                .dmem_we    (dmem_we),
+                .dmem_re    (dmem_re),
+                .ld_data    (ld_data),
+                .dbg_reg_addr(dbg_reg_addr),
+                .dbg_reg_data(dbg_reg_data),
+                .pc_dbg     (pc_dbg),
+                ._bogus     (1'b0)
+            );
+        end
+    endgenerate
 
     // ──────────────────────────────────────
     //  Debug UART

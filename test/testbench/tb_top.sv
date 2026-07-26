@@ -9,14 +9,16 @@
 // and testable with cocotb -- everything else is a straight copy, so
 // porting future riscv_top.sv changes here should be mechanical:
 //   1. dp_ram (Quartus altsyncram megafunction, no Verilator support) is
-//      swapped for dp_ram_model (fpga/dp_ram_model.v), a behavioral
+//      swapped for dp_ram_model (fpga/dp_ram_model.sv), a behavioral
 //      equivalent.
 //   2. ARDUINO_IO's inout bundle is split into separate ext_rx (input) /
 //      ext_tx (output) ports instead of a single inout, so cocotb can
 //      drive/observe each side without inout-net gymnastics. ext_rx/ext_tx
 //      map 1:1 onto ARDUINO_IO[0]/ARDUINO_IO[1] on real hardware.
 
-module tb_top (
+module tb_top #(
+    parameter CORE_TYPE = "PIPELINED"  // mirrors fpga/riscv_top.sv's CORE_TYPE
+) (
     input  logic [9:0] SW,
     input  logic [1:0] KEY,
     input  logic       CLOCK_50,
@@ -180,7 +182,7 @@ module tb_top (
     assign LEDR[9:0] = {~dbg_rx, ~dbg_tx, 1'b0, imem_addr[8:2]};
 
     // ──────────────────────────────────────
-    //  DP BRAM (behavioral model -- see fpga/dp_ram_model.v)
+    //  DP BRAM (behavioral model -- see fpga/dp_ram_model.sv)
     // ──────────────────────────────────────
     // Port B is normally the core's data memory port; while the debug
     // UART is servicing WRITE_MEM/READ_MEM (dbg_mem_valid), it takes over
@@ -218,7 +220,7 @@ module tb_top (
         .CLK_BITS    (16),
         .DATA_WIDTH  (8),
         .PARITY_BITS (0),
-        .STOP_BITS   (1)
+        .STOP_BITS   (2)
     ) u_uart (
         .clk            (clk),
         .rst            (rst),
@@ -237,21 +239,43 @@ module tb_top (
     // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
-    riscv_core u_core (
-        .clk        (clk),
-        .rst        (rst),
-        .halt       (halt & KEY[1]),
-        .imem_addr  (imem_addr),
-        .imem_rdata (imem_rdata),
-        .dmem_addr  (dmem_addr),
-        .dmem_wdata (dmem_wdata),
-        .dmem_we    (dmem_we),
-        .dmem_re    (dmem_re),
-        .ld_data    (ld_data),
-        .dbg_reg_addr(dbg_reg_addr),
-        .dbg_reg_data(dbg_reg_data),
-        .pc_dbg     (pc_dbg)
-    );
+    generate
+        if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
+            riscv_core_single_cycle u_core (
+                .clk        (clk),
+                .rst        (rst),
+                .halt       (halt & KEY[1]),
+                .imem_addr  (imem_addr),
+                .imem_rdata (imem_rdata),
+                .dmem_addr  (dmem_addr),
+                .dmem_wdata (dmem_wdata),
+                .dmem_we    (dmem_we),
+                .dmem_re    (dmem_re),
+                .ld_data    (ld_data),
+                .dbg_reg_addr(dbg_reg_addr),
+                .dbg_reg_data(dbg_reg_data),
+                .pc_dbg     (pc_dbg),
+                ._bogus     (1'b0)
+            );
+        end else begin : g_core
+            riscv_core u_core (
+                .clk        (clk),
+                .rst        (rst),
+                .halt       (halt & KEY[1]),
+                .imem_addr  (imem_addr),
+                .imem_rdata (imem_rdata),
+                .dmem_addr  (dmem_addr),
+                .dmem_wdata (dmem_wdata),
+                .dmem_we    (dmem_we),
+                .dmem_re    (dmem_re),
+                .ld_data    (ld_data),
+                .dbg_reg_addr(dbg_reg_addr),
+                .dbg_reg_data(dbg_reg_data),
+                .pc_dbg     (pc_dbg),
+                ._bogus     (1'b0)
+            );
+        end
+    endgenerate
 
     // ──────────────────────────────────────
     //  Debug UART

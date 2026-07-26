@@ -5,22 +5,32 @@ SIM              	?= verilator
 TOPLEVEL_LANG		= verilog
 
 VERILOG_SOURCES     = $(PWD)/../src/riscv_core/riscv_core.sv
+VERILOG_SOURCES     += $(PWD)/../src/riscv_core/riscv_core_single_cycle.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/debug_uart.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_uart.sv
-VERILOG_SOURCES     += $(PWD)/../fpga/hex_display.v
-VERILOG_SOURCES     += $(PWD)/../fpga/dp_ram_model.v
+VERILOG_SOURCES     += $(PWD)/../fpga/hex_display.sv
+VERILOG_SOURCES     += $(PWD)/../fpga/dp_ram_model.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_top.sv
+VERILOG_SOURCES     += $(PWD)/testbench/tb_diff.sv
 
 TOPLEVEL          	?= tb_core
 MODULE           	?= testbench.test_full
+
+CORE_TYPE			?= PIPELINED
 
 EXTRA_ARGS       	+= --trace-fst
 EXTRA_ARGS       	+= --trace-structs
 EXTRA_ARGS       	+= -Wno-fatal
 EXTRA_ARGS 			+= --sv
+# CORE_TYPE only exists as a parameter on tb_top -- passing -GCORE_TYPE for
+# any other TOPLEVEL makes Verilator error ("Parameters ... not found"), so
+# only add it when tb_top is actually the target.
+ifeq ($(TOPLEVEL),tb_top)
+EXTRA_ARGS			+= -GCORE_TYPE=\"$(CORE_TYPE)\"
+endif
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ns
 VERILATOR_TRACE = 1
