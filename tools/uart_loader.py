@@ -1,4 +1,4 @@
-# software/uart_loader.py
+# tools/uart_loader.py
 
 import serial
 import struct

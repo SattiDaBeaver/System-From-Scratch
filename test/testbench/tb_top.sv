@@ -68,6 +68,10 @@ module tb_top #(
     logic [31:0] pc_dbg;
     logic        halt;
 
+    // req/vld memory handshake -- mirrors fpga/riscv_top.sv
+    logic        imem_req;
+    logic        dmem_req;
+
     // Debug-UART-driven BRAM port B access (hardware bootloader) -- see
     // the BRAM port B mux below.
     logic [31:0] dbg_mem_addr;
@@ -114,6 +118,29 @@ module tb_top #(
 
     assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
     assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
+
+    // ──────────────────────────────────────
+    //  Memory-read valid tracking (mirrors fpga/riscv_top.sv -- see
+    //  mem_stall_ctrl below.)
+    // ──────────────────────────────────────
+    logic imem_rvalid;
+    logic dmem_rvalid;
+    logic core_halt;
+
+    always_ff @(posedge clk) begin
+        imem_rvalid <= 1'b1;      // imem is read every non-halted cycle
+        dmem_rvalid <= dmem_req;  // generalized from dmem_re -- see fpga/riscv_top.sv
+    end
+
+    mem_stall_ctrl u_mem_stall_ctrl (
+        .clk         (clk),
+        .rst         (rst),
+        .dbg_halt    (halt),
+        .imem_rvalid (imem_rvalid),
+        .dmem_re     (dmem_re),
+        .dmem_rvalid (dmem_rvalid),
+        .core_halt   (core_halt)
+    );
 
     // ──────────────────────────────────────
     //  Load Data Mux
@@ -198,7 +225,7 @@ module tb_top #(
     assign dbg_mem_rdata = bram_rd_data;
 
     dp_ram_model #(
-        .REGISTERED_ADDR (0)
+        .REGISTERED_ADDR (1)
     ) u_bram (
         .clock      (clk),
         // Port A — instruction fetch
@@ -239,12 +266,16 @@ module tb_top #(
     // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
+    // core_halt only guarantees correct memory timing for
+    // CORE_TYPE=SINGLE_CYCLE -- see fpga/riscv_top.sv.
     generate
         if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
+            assign imem_req = 1'b0;
+            assign dmem_req = dmem_re;  // preserves dmem_rvalid's original trigger
             riscv_core_single_cycle u_core (
                 .clk        (clk),
                 .rst        (rst),
-                .halt       (halt & KEY[1]),
+                .halt       (core_halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
                 .dmem_addr  (dmem_addr),
@@ -264,11 +295,15 @@ module tb_top #(
                 .halt       (halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
+                .imem_req   (imem_req),
+                .imem_vld   (imem_rvalid),
                 .dmem_addr  (dmem_addr),
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
                 .ld_data    (ld_data),
+                .dmem_req   (dmem_req),
+                .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
                 .pc_dbg     (pc_dbg),

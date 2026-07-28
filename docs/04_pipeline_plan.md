@@ -96,26 +96,31 @@ already covers it without extra logic.
 
 ## 4. Memory-timing contract with the real BRAM
 
-Both `dp_ram.v` (`address_reg_a` should be regenerated to UNREGISTERED per
-the earlier IP audit) and `dp_ram_model.v` (already defaults
-`REGISTERED_ADDR=0`) need to agree with whatever latency the pipeline
-actually assumes. Two sub-decisions, to be settled before RTL starts:
+**Resolved.** `riscv_core.sv` now has an explicit req/vld handshake
+(`imem_req`/`imem_vld`, `dmem_req`/`dmem_vld`) instead of assuming a fixed
+latency: IF/MEM present a request and the whole front-end (or just MEM,
+depending on which side is waiting — see `mem_wait`/`if_wait`/`front_stall`
+in `riscv_core.sv`) freezes until `vld` comes back, generalizing the
+existing `id_stall`/`ex_flush` freeze+bubble mechanism to memory latency of
+any length. This sidesteps the 5-vs-6-stage question below entirely — the
+pipeline is correct for 1-cycle latency today and for more cycles later
+(e.g. a cache) without changing the register count, because it waits on
+`vld` rather than hardcoding a stage count for one fixed latency.
 
-- If the regenerated `dp_ram.v` genuinely achieves the same-cycle
-  address-in/data-out behavior `dp_ram_model.v` models at
-  `REGISTERED_ADDR=0`, IF/MEM stay exactly as drawn above (address
-  presented in IF/MEM's own cycle, data consumed that same cycle by the
-  *next* stage's pipeline register).
-- If MAX10 M9K genuinely cannot avoid a 1-cycle address-to-data latency
-  (likely, per the hardware-issue discussion — block RAM read latency is
-  usually not eliminable, only the *extra* wizard-added register is),
-  IF and MEM each effectively need one more cycle of latency than drawn
-  here, i.e. IF's `imem_rdata` isn't valid until the cycle *after*
-  `imem_addr` changes. This turns the diagram in §1 into a 6-stage
-  pipeline (IF1/IF2, or equivalently a 1-cycle IF stall built into IF
-  itself) rather than 5. **This needs to be confirmed against Quartus
-  timing/simulation before the register count is finalized** — flagged
-  here explicitly so it isn't silently assumed away.
+`fpga/riscv_top.sv`/`test/testbench/tb_top.sv` wire `imem_vld`/`dmem_vld` to
+registers (`imem_rvalid`/`dmem_rvalid`) that are supposed to pulse one cycle
+after `imem_req`/`dmem_req`, matching `dp_ram_model.sv`'s `REGISTERED_ADDR=1`
+timing (now the default in `tb_top.sv`, matching real M9K block RAM).
+`dmem_rvalid <= dmem_req` does this correctly. **`imem_rvalid` does not** —
+see §6.2, a known bug found this session, not yet fixed.
+
+Regression status (`testbench.test_full` via `tb_core`/zero-latency arrays):
+unchanged, 27/27 passing — the new ports are a correct no-op there since
+`vld` is tied `1'b1`. `test_diff`, `test_uart`, `test_debugger`: all passing
+under the same zero-latency tie-off. `test_top.py` (`tb_top`, which actually
+exercises `REGISTERED_ADDR=1` sync-read timing) currently fails for both
+`CORE_TYPE`s — root-caused to the `imem_rvalid` bug below, not to the core's
+new stall logic itself.
 
 ## 5. Reset behavior
 
@@ -130,9 +135,9 @@ actually assumes. Two sub-decisions, to be settled before RTL starts:
 
 ## 6. Open questions / decisions still needed before RTL starts
 
-1. **Real BRAM latency (§4)** — is it 5-stage or 6-stage? Needs a Quartus
-   answer, not a simulation-only answer, since this is precisely the class
-   of bug that's invisible in sim today.
+1. ~~**Real BRAM latency (§4)** — is it 5-stage or 6-stage?~~ **Resolved by
+   req/vld** (§4) — the pipeline waits on `vld` generically instead of
+   committing to a fixed stage count, so this question no longer applies.
 2. **Stall-only v1 vs. forwarding from the start** — plan above assumes
    stall-only for v1; confirm that's still the right call once the stage
    count from (1) is settled, since a 6-stage pipeline stalls more often
@@ -141,6 +146,49 @@ actually assumes. Two sub-decisions, to be settled before RTL starts:
    block reading `if_id`/`id_ex`'s `rd`/`rs1`/`rs2` fields (matching this
    codebase's existing style of separate named combinational blocks like
    `Decoder_Logic`), decided once (2) is settled.
+
+### 6.1 `mem_stall_ctrl` doesn't cover the pipelined core
+
+`src/memory/mem_stall_ctrl.sv` (an external whole-core `halt` wrapper) only
+guarantees correct memory timing for `CORE_TYPE=SINGLE_CYCLE` — freezing
+every stage doesn't map onto the pipelined core's per-stage stalling.
+**Resolved for the pipelined core specifically by req/vld (§4)**; the
+single-cycle core keeps using `mem_stall_ctrl` unchanged (frozen golden
+model, out of scope for this work).
+
+### 6.2 KNOWN BUG: `imem_rvalid` doesn't track registered-address latency
+
+Found while testing req/vld against `test/testbench/test_top.py`
+(`tb_top`, `REGISTERED_ADDR=1`): both `fpga/riscv_top.sv` and
+`test/testbench/tb_top.sv` have
+
+```systemverilog
+always_ff @(posedge clk) begin
+    imem_rvalid <= 1'b1;      // always true -- wrong once REGISTERED_ADDR=1
+    dmem_rvalid <= dmem_req;  // correct -- one cycle behind the request
+end
+```
+
+`imem_rvalid` was hardwired `1'b1` from before req/vld existed, when
+`imem_rdata` really was valid every cycle (`REGISTERED_ADDR=0`). Now that
+`tb_top.sv`'s `dp_ram_model` defaults to `REGISTERED_ADDR=1` (real M9K
+timing), `imem_rdata` genuinely lags `imem_addr` by one cycle every fetch,
+but `imem_vld` (wired to `imem_rvalid`) claims it's always valid — so both
+`riscv_core` and `riscv_core_single_cycle` get fed stale instruction data
+on effectively every cycle. This is not a bug in the new stall logic
+itself; `test_top.py` fails identically for both `CORE_TYPE`s, confirming
+it's this shared wiring bug, not core-specific pipeline logic.
+
+The obvious fix (`imem_rvalid <= imem_req`) doesn't work as a drop-in: the
+`SINGLE_CYCLE` generate branch ties `imem_req = 1'b0` unconditionally
+(single-cycle core has no `imem_req` port), so `imem_rvalid` would never
+assert and `mem_stall_ctrl` would hang forever in `FETCH_WAIT`. Needs either
+a `SINGLE_CYCLE`-branch-specific `imem_req` tie-off (e.g. `1'b1` there
+instead of `1'b0`, since that branch's `mem_stall_ctrl` expects "always
+requesting"), or a separate always-pulsing signal for `mem_stall_ctrl` to
+sample. **Not yet fixed** — next session should start here before writing
+the task-#12 PIPELINED-specific req/vld tests, since those tests can't pass
+until real `imem_vld` timing is correct.
 
 ## 7. Verification plan
 
@@ -229,3 +277,17 @@ regfile[0:31] and the touched dmem words between them.
    build (cocotb can't introspect the elaborated Verilog parameter from
    Python, so running the file twice, once per `CORE_TYPE`, is the full
    regression matrix for that testbench).
+
+   **Update, 27 Jul 2026:** confirmed via real hardware bring-up symptoms
+   (STEP only "taking" ~1/3 of the time, RESUME never converging) plus
+   simulation once `dp_ram_model`'s `REGISTERED_ADDR` was flipped to 1 that
+   this §4/§6 item is real: real BRAM's registered-address read latency
+   breaks the single-cycle core's zero-latency-read assumption exactly as
+   predicted. Fixed for `CORE_TYPE=SINGLE_CYCLE` via a new external module,
+   `src/memory/mem_stall_ctrl.sv`, that holds the core's `halt` input
+   asserted from fetch until data is actually valid (see `docs/dev_log.md`'s
+   27 Jul 2026 entry for the full design and an open follow-up bug it
+   surfaced in `debug_uart.sv`'s reset). This does NOT resolve §4/§6 item 1
+   for the pipelined core -- whole-core-freeze doesn't map onto per-stage
+   pipeline stalling, so the 5- vs 6-stage question below is still open and
+   still needs its own fix once pipeline work resumes.

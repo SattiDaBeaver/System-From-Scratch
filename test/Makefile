@@ -8,6 +8,7 @@ VERILOG_SOURCES     = $(PWD)/../src/riscv_core/riscv_core.sv
 VERILOG_SOURCES     += $(PWD)/../src/riscv_core/riscv_core_single_cycle.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/debug_uart.sv
+VERILOG_SOURCES     += $(PWD)/../src/memory/mem_stall_ctrl.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_uart.sv

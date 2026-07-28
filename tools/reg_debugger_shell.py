@@ -1,4 +1,4 @@
-# software/reg_debugger_shell.py
+# tools/reg_debugger_shell.py
 #
 # Interactive REPL wrapper around RegDebugger (reg_debugger.py) for poking
 # at the hardware register debugger (debug_uart.sv) by hand over a serial
@@ -9,7 +9,7 @@ import cmd
 import sys
 import argparse
 
-from reg_debugger import RegDebugger, print_dump, load_words_from_file, BAUD_RATE, TIMEOUT
+from reg_debugger import RegDebugger, print_dump, print_hexdump, load_words_from_file, BAUD_RATE, TIMEOUT
 
 
 class RegDebuggerShell(cmd.Cmd):
@@ -52,9 +52,8 @@ class RegDebuggerShell(cmd.Cmd):
         apart. Only advances exactly one instruction per step when the
         core is halted and running on the main clk (not a slow_clk
         divider) -- see debug_uart.sv's header comment. No reply."""
-        n = int(arg) if arg.strip() else 1
-
         def run():
+            n = int(arg, 0) if arg.strip() else 1
             self.dbg.step(n)
             print(f"[INFO] Stepped {n} cycle(s)")
         self._guard(run)
@@ -124,6 +123,24 @@ class RegDebuggerShell(cmd.Cmd):
             print(f"0x{addr:08x}: 0x{val:08x} ({val})")
         self._guard(run)
 
+    def do_hexdump(self, arg):
+        """hexdump <addr> <n>
+        Read n consecutive 32-bit words starting at byte address addr, one
+        CMD_READ_MEM (0x08) round-trip per word (there is no burst-read
+        command in the wire protocol), and print them hexdump-style, 4
+        words per line. Only accepted while halted, same as rmem."""
+        parts = arg.split()
+        if len(parts) != 2:
+            print("[ERROR] usage: hexdump <addr> <n>")
+            return
+
+        def run():
+            addr = int(parts[0], 0)
+            n = int(parts[1], 0)
+            words = self.dbg.read_mem_range(addr, n)
+            print_hexdump(addr, words)
+        self._guard(run)
+
     def do_load(self, arg):
         """load <file> [base_addr] [--no-trim]
         Halt the core, then WRITE_MEM every word of the program image at
@@ -174,6 +191,7 @@ class RegDebuggerShell(cmd.Cmd):
         print("  dump         read all 32 registers + PC in one shot")
         print("  wmem <a> <d> write 32-bit word d to byte address a (halted only)")
         print("  rmem <a>     read 32-bit word from byte address a (halted only)")
+        print("  hexdump <a> <n>  read n consecutive 32-bit words from a (halted only)")
         print("  load <f>     halt + WRITE_MEM every word of raw binary f")
         print("  quit         close the serial port and exit")
 

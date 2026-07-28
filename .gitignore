@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# Scratch build output
+.tmp/
+
 # Claude
 CLAUDE.md
 .claude/

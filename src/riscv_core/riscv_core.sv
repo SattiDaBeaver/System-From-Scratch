@@ -8,6 +8,8 @@ module riscv_core #(
     // Instruction memory interface (read only)
     output logic [31:0] imem_addr,
     input  logic [31:0] imem_rdata,
+    output logic        imem_req,   // IF is presenting imem_addr this cycle
+    input  logic        imem_vld,   // imem_rdata is valid for imem_addr
 
     // Data memory
     output logic [31:0] dmem_addr,
@@ -15,6 +17,8 @@ module riscv_core #(
     output logic        dmem_we,
     output logic        dmem_re,
     input  logic [31:0] ld_data,
+    output logic        dmem_req,   // MEM has an outstanding load/store this cycle
+    input  logic        dmem_vld,   // the op requested by dmem_req has completed
 
     // Debug interface (read only, no effect on core behavior)
     // Async indexed read instead of exposing the full regfile as a packed
@@ -198,6 +202,23 @@ module riscv_core #(
     );
 
     //*************************************
+    //*  req/vld memory handshake         *
+    //*************************************
+    // Real synchronous-read memory (Quartus altsyncram, see fpga/dp_ram.v)
+    // never returns data the same cycle the address is presented. imem_req/
+    // dmem_req tell memory "here's an address, respond when ready"; vld
+    // pulses back when the corresponding rdata/ld_data is actually valid.
+    // if_wait/mem_wait generalize id_stall/ex_flush's existing freeze+bubble
+    // mechanism to memory latency of any length (1 cycle today, more with a
+    // future cache) instead of hardcoding one extra pipeline stage.
+    logic if_wait, mem_wait, front_stall;
+    assign imem_req    = !halt;
+    assign dmem_req     = dmem_we || dmem_re;
+    assign if_wait      = imem_req  && !imem_vld;
+    assign mem_wait      = dmem_req  && !dmem_vld;
+    assign front_stall = id_stall  || if_wait;
+
+    //*************************************
     //*             Logic                 *
     //*************************************
     //*************  IF stage  ************
@@ -208,7 +229,7 @@ module riscv_core #(
             pc <= 32'b0;
         end
         else if (!halt) begin
-            if (id_stall) begin
+            if (mem_wait || front_stall) begin
                 pc <= pc;
             end
             else begin
@@ -233,12 +254,17 @@ module riscv_core #(
             if_id_valid <= 1'b0;
         end
         else if (!halt) begin
-            if (ex_flush) begin
+            if (mem_wait) begin
+                if_id_instr <= if_id_instr;
+                if_id_pc    <= if_id_pc;
+                if_id_valid <= if_id_valid;
+            end
+            else if (ex_flush) begin
                 if_id_instr <= 32'b0;
                 if_id_pc    <= 32'b0;
                 if_id_valid <= 1'b0;
             end
-            else if (id_stall) begin
+            else if (front_stall) begin
                 if_id_instr <= if_id_instr;
                 if_id_pc    <= if_id_pc;
                 if_id_valid <= if_id_valid;
@@ -382,7 +408,20 @@ module riscv_core #(
             id_ex_valid       <= 1'b0;
         end
         else if (!halt) begin
-            if (ex_flush) begin
+            if (mem_wait) begin
+                // MEM can't accept a new result from EX while it's still
+                // waiting on the outstanding one -- hold id_ex (and
+                // whatever it holds, e.g. a resolved branch) in place
+                // rather than letting it advance or get bubbled.
+                id_ex_rd         <= id_ex_rd;
+                id_ex_ctrl        <= id_ex_ctrl;
+                id_ex_imm         <= id_ex_imm;
+                id_ex_src1_value  <= id_ex_src1_value;
+                id_ex_src2_value  <= id_ex_src2_value;
+                id_ex_pc          <= id_ex_pc;
+                id_ex_valid       <= id_ex_valid;
+            end
+            else if (ex_flush) begin
                 id_ex_rd         <= 5'b0;
                 id_ex_ctrl        <= 32'b0;
                 id_ex_imm         <= 32'b0;
@@ -391,7 +430,7 @@ module riscv_core #(
                 id_ex_pc          <= 32'b0;
                 id_ex_valid       <= 1'b0;
             end
-            else if (id_stall) begin
+            else if (front_stall) begin
                 // The dependent instruction stays parked in if_id (held
                 // above); EX gets a bubble instead of a second copy of
                 // whatever's already in id_ex.
@@ -487,13 +526,24 @@ module riscv_core #(
             ex_mem_valid       <= 1'b0;
         end
         else if (!halt) begin
-            ex_mem_result      <= ex_result;
-            ex_mem_src2_value  <= id_ex_src2_value;
-            ex_mem_rd          <= id_ex_rd;
-            ex_mem_is_load     <= ex_is_load;
-            ex_mem_is_s_instr  <= ex_is_s_instr;
-            ex_mem_wr_en       <= ex_wr_en;
-            ex_mem_valid       <= id_ex_valid;
+            if (mem_wait) begin
+                ex_mem_result      <= ex_mem_result;
+                ex_mem_src2_value  <= ex_mem_src2_value;
+                ex_mem_rd          <= ex_mem_rd;
+                ex_mem_is_load     <= ex_mem_is_load;
+                ex_mem_is_s_instr  <= ex_mem_is_s_instr;
+                ex_mem_wr_en       <= ex_mem_wr_en;
+                ex_mem_valid       <= ex_mem_valid;
+            end
+            else begin
+                ex_mem_result      <= ex_result;
+                ex_mem_src2_value  <= id_ex_src2_value;
+                ex_mem_rd          <= id_ex_rd;
+                ex_mem_is_load     <= ex_is_load;
+                ex_mem_is_s_instr  <= ex_is_s_instr;
+                ex_mem_wr_en       <= ex_wr_en;
+                ex_mem_valid       <= id_ex_valid;
+            end
         end
     end
 
@@ -513,10 +563,21 @@ module riscv_core #(
             mem_wb_valid   <= 1'b0;
         end
         else if (!halt) begin
-            mem_wb_wr_data <= mem_wr_data;
-            mem_wb_rd      <= ex_mem_rd;
-            mem_wb_wr_en   <= ex_mem_wr_en;
-            mem_wb_valid   <= ex_mem_valid;
+            if (mem_wait) begin
+                // ld_data/mem_wr_data isn't valid yet -- bubble instead of
+                // latching garbage into mem_wb_wr_data and committing it
+                // via the (ungated) regfile write port below.
+                mem_wb_wr_data <= 32'b0;
+                mem_wb_rd      <= 5'b0;
+                mem_wb_wr_en   <= 1'b0;
+                mem_wb_valid   <= 1'b0;
+            end
+            else begin
+                mem_wb_wr_data <= mem_wr_data;
+                mem_wb_rd      <= ex_mem_rd;
+                mem_wb_wr_en   <= ex_mem_wr_en;
+                mem_wb_valid   <= ex_mem_valid;
+            end
         end
     end
 

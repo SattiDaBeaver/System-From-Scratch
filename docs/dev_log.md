@@ -562,3 +562,181 @@
   - Hardware-only, not verifiable in this environment: actually setting
     `CORE_TYPE` via Quartus's parameter-override UI/QSF and confirming the
     fitter picks the right generate branch on the real DE10-Lite.
+
+27 Jul 2026
+- Root-caused the real-hardware bug where `CORE_TYPE=SINGLE_CYCLE` only ever
+  completed `test_full` via repeated single STEPs (never RESUME), and even
+  STEP only "took" roughly 1/3 of the time: Quartus's `altsyncram` BRAM
+  (`fpga/dp_ram.v`) always registers its read address before the array read
+  happens -- true same-cycle combinational reads are architecturally
+  impossible there, regardless of IP wizard settings -- while both cores and
+  `fpga/dp_ram_model.sv` (at its default `REGISTERED_ADDR=0`) assumed
+  zero-latency reads. This is the same root cause `04_pipeline_plan.md` §4/§6
+  already flagged as an open question for the pipelined core; this session's
+  fix targets the frozen `riscv_core_single_cycle` golden model specifically
+  (milestone 9, hardware bring-up), leaving the pipelined core's own
+  per-stage IF/MEM latency fix as that still-open follow-up.
+- Fix (approved design: a general req/vld-style synchronous memory
+  interface, external to both cores, so a future cache/slower memory can
+  extend it later without touching either core or the top-level wiring
+  again):
+  - New module `src/memory/mem_stall_ctrl.sv`: an FSM (`IDLE` ->
+    `FETCH_WAIT` -> `DECODED` -> [`MEM_WAIT` if the decoded instruction is a
+    load] -> `COMMIT` -> back to `IDLE`) that holds `core_halt` asserted
+    until the fetched instruction (and, for loads, the loaded data) is
+    actually valid, then drops it for exactly one cycle to let `pc`/regfile
+    commit. Only `IDLE` samples the debug UART's `dbg_halt` request --
+    critical, since `debug_uart`'s STEP only pulses `dbg_halt` low for a
+    single clk cycle, not for as long as a full fetch-to-commit sequence
+    actually takes; sampling `dbg_halt` in every state would re-park the FSM
+    the cycle after STEP's pulse ends, before it ever reaches `COMMIT`, and
+    `pc` would never advance on STEP at all.
+  - Added `imem_rvalid`/`dmem_rvalid` registers next to the existing
+    `bram_sel`/`uart_sel` decode logic in `fpga/riscv_top.sv` and
+    `test/testbench/tb_top.sv` (`imem_rvalid <= 1'b1` unconditionally,
+    `dmem_rvalid <= dmem_re`), feeding `mem_stall_ctrl`. This is the
+    intended future extension point: swapping in a cache or larger/slower
+    memory later only means changing how these two `rvalid` signals are
+    generated -- `mem_stall_ctrl` and both cores stay untouched.
+  - Wired `mem_stall_ctrl`'s `core_halt` into `.halt(core_halt & KEY[1])` on
+    the `SINGLE_CYCLE` generate branch only, in both `riscv_top.sv` and
+    `tb_top.sv`; the `PIPELINED` branch is unchanged (`halt & KEY[1]`) since
+    whole-core-freeze doesn't map onto per-stage pipeline stalling (still
+    needs the real fix from `04_pipeline_plan.md` §4/§6.1).
+  - `riscv_core_single_cycle.sv` itself was NOT modified (it's the frozen
+    golden reference `tb_diff.sv` differentially fuzzes against) -- both it
+    and `riscv_core.sv` already exposed a `halt` input that freezes `pc` and
+    gates the regfile write port without gating their combinational
+    decode/ALU/address logic, which was sufficient to build the whole fix as
+    an external wrapper with zero core RTL changes.
+  - `test/testbench/tb_top.sv`'s `dp_ram_model` instantiation flipped
+    `.REGISTERED_ADDR(0)` -> `.REGISTERED_ADDR(1)`, matching real BRAM's
+    latency -- this is what makes the original bug reproducible (and the fix
+    verifiable) in simulation, closing the gap that let it ship to hardware
+    undetected in the first place.
+  - Added `test_step_reliability` and `test_resume_correctness` to
+    `test/testbench/test_top.py` as the regression tests for this exact bug
+    (200 consecutive STEPs must each advance `pc` by exactly 4; a RESUME run
+    must still converge to `test_full.asm`'s correct final register state).
+  - Explicitly out of scope for this session (deferred at the user's
+    request): reset synchronization/double-flopping, and `debug_uart`'s
+    halt-on-reset default -- see below, this is exactly what tripped up
+    verification.
+- Environment note: got the full cocotb + Verilator regression suite
+  actually running end-to-end inside the repo's own `.venv` for the first
+  time (`test/testbench/test_top.py` via
+  `make sim TOPLEVEL=tb_top MODULE=testbench.test_top CORE_TYPE=SINGLE_CYCLE
+  CFG_LDLIBS_THREADS=-lpthread`, with a newer system GCC
+  (`/pkg/qct/software/gnu64/gcc/11.2.0/bin`) and the RISC-V assembler
+  (`/pkg/qct/software/gnu/riscv/riscv64-unknown-elf-gcc-10.2.0/bin`) added to
+  `PATH` -- both pre-existing system toolchains, nothing installed). Had to
+  fix a pip-installed-package misconfiguration to get there: the venv's
+  `verilator` package's `verilated.mk` had `CFG_CXXFLAGS_PCH_I` (the compiler
+  flag to consume a precompiled header, e.g. `-include` for GCC) left blank
+  from whatever toolchain it was pip-built against, so the PCH filename was
+  passed to `c++` as a bare positional argument instead of via `-include`.
+  Fixed directly in `.venv/lib/python3.9/site-packages/verilator/include/
+  verilated.mk` (`CFG_CXXFLAGS_PCH_I = -include`) -- editing inside the venv
+  is fine, installing anything outside it is not.
+- Ran the fixed suite under `CORE_TYPE=SINGLE_CYCLE`,
+  `REGISTERED_ADDR=1`: `test_clock_divider` and `test_uart_mux` PASS,
+  `test_resume_correctness` PASS (strong positive signal that
+  `mem_stall_ctrl`'s core design is sound for the free-run/RESUME case), but
+  `test_halt_override`, `test_single_cycle_core_smoke`, and
+  `test_step_reliability` FAIL.
+- Diagnosed the 3 failures with a throwaway cycle-by-cycle instrumented
+  cocotb test (logging `halt`/`core_halt`/`mem_stall_ctrl.state`/`pc` every
+  clk, not checked in) rather than guessing from the failure asserts alone.
+  All three turned out to share one root cause, and it isn't
+  `mem_stall_ctrl`: `debug_uart.sv`'s `halt` register resets *synchronously*
+  (`always_ff @(posedge clk) if (rst) halt <= 1'b1; ...`), but `clk` itself
+  is generated by a divider (`clk_div_toggle`) that is held frozen at 0 for
+  as long as `rst` is asserted -- so `clk` never ticks during reset, meaning
+  `debug_uart`'s synchronous reset block never actually fires. `halt` is left
+  at whatever value simulation/hardware happens to power up with (0 in
+  Verilator) instead of the intended halt-on-reset default, so the core free
+  -runs from t=0 with no halt ever asserted. Confirmed via the instrumented
+  run: `halt=0` from the very first `CLOCK_50` edge post-reset, well before
+  any debug-UART command was ever sent. This explains all three failures
+  without any bug in the new stall controller:
+  - `test_step_reliability`: the program is already running freely before
+    STEP is even sent, so `pc` jumps by far more than 4 per STEP.
+  - `test_halt_override`/`test_single_cycle_core_smoke`: the core free-runs
+    on its own straight into `test_basic.asm`'s trailing self-loop before the
+    test ever checks anything, so `pc_before == pc_after` (or the smoke
+    test's phase-index check) trivially "passes/fails" for reasons that have
+    nothing to do with whether the `KEY[1]` override itself works.
+  `mem_stall_ctrl` resets correctly regardless (it uses `posedge clk or
+  posedge rst`, i.e. async reset), so this bug is entirely isolated to
+  `debug_uart.sv`'s reset style interacting with the divided `clk`.
+- This is precisely the "reset synchronization/double-flopping" and
+  "`debug_uart` halt-on-reset default" topic the user asked to defer to a
+  separate discussion -- confirmed here as a real, load-bearing bug (not a
+  hypothetical), rather than fixed. **Not yet fixed. Next step once resumed:
+  decide the fix (e.g. give `debug_uart`'s `halt` an async reset like
+  `mem_stall_ctrl` already uses, or drive `debug_uart`'s reset off `clk50`
+  instead of the divided `clk`) and re-run the full `test_top.py` suite under
+  `CORE_TYPE=SINGLE_CYCLE`/`REGISTERED_ADDR=1` to confirm all 6 tests pass.**
+- Still pending after that: hardware bring-up itself (flash
+  `CORE_TYPE=SINGLE_CYCLE` with the stall controller, re-run the STEP-200/
+  RESUME sequence on the real board), confirming `tb_diff.sv` is unaffected
+  (expected no-op, doesn't route through `riscv_top`/`mem_stall_ctrl`), and
+  a `README.md` update -- none of this done yet.
+
+## req/vld memory handshake for the pipelined core
+
+- Implemented per-port req/vld handshaking (`imem_req`/`imem_vld`,
+  `dmem_req`/`dmem_vld`) directly on `riscv_core.sv`, generalizing the
+  existing `id_stall`/`ex_flush` freeze+bubble mechanism to memory latency
+  of any length via new `if_wait`/`mem_wait`/`front_stall` signals. Two
+  correctness bugs caught by review before implementation (see
+  `docs/04_pipeline_plan.md` §4): `mem_wait` must outrank `ex_flush` in the
+  `if_id`/`id_ex` mux chains (else a branch held in `id_ex` during a MEM
+  stall re-squashes `if_id` every stall cycle), and `MEM_WB_Reg` needed a
+  net-new `mem_wait` bubble (it had zero gating before, and was latching
+  invalid `ld_data` into the regfile write port during a stall).
+- Wired through `fpga/riscv_top.sv` and `test/testbench/tb_top.sv`
+  (PIPELINED branch only); zero-latency testbenches (`tb_core.sv`,
+  `tb_diff.sv`, `tb_soc.sv`) tie the new ports to `1'b1`/unused.
+- Regression: `test_full` (27/27), `test_diff` (7/7), `test_uart`,
+  `test_debugger` all pass unchanged. `test_bootloader` fails, but
+  confirmed via `git stash` to fail identically on unmodified `main` --
+  pre-existing, unrelated.
+- **Found a real bug, not yet fixed**, while running `test_top.py`
+  against `tb_top` (which now defaults to `dp_ram_model`'s
+  `REGISTERED_ADDR=1`, real BRAM timing): `imem_rvalid` in both
+  `riscv_top.sv` and `tb_top.sv` is hardwired `<= 1'b1` every cycle -- a
+  leftover from before `REGISTERED_ADDR` was flipped to 1, when that was
+  actually true. It doesn't track the real one-cycle address-register
+  latency the way `dmem_rvalid <= dmem_req` correctly does, so both cores
+  get fed stale `imem_rdata` on effectively every fetch. Confirmed it's
+  this shared wiring bug and not core-specific logic: `test_top.py` fails
+  the same way for both `CORE_TYPE=PIPELINED` and `CORE_TYPE=SINGLE_CYCLE`.
+  Full detail and why the obvious fix isn't a drop-in (breaks
+  `SINGLE_CYCLE`'s `mem_stall_ctrl` path) is in
+  `docs/04_pipeline_plan.md` §6.2. **Next step: fix `imem_rvalid`, confirm
+  `test_top.py` passes for both core types, then write the
+  PIPELINED-specific req/vld tests (load-then-branch stall sequence,
+  target the two review-caught bug classes directly) and re-run the full
+  suite once more before calling this done.**
+
+27 Jul 2026 (later)
+- Small, unrelated tooling additions to the debug terminal while the
+  `imem_rvalid` fix above is still pending -- no RTL touched:
+  - `tools/reg_debugger.py`/`reg_debugger_shell.py`: added a `hexdump
+    <addr> <n>` command (CLI subcommand and shell command) that issues n
+    sequential `READ_MEM` round-trips starting at `addr` and prints them
+    4-words-per-line, address-labeled. There's no burst-read in the wire
+    protocol (`debug_uart.sv`), so this is just a client-side loop over
+    the existing single-word `READ_MEM` -- no protocol change.
+  - Fixed a real shell bug in `do_step` (`reg_debugger_shell.py`): it
+    called `int(arg)` *before* entering the `self._guard(...)` try/except,
+    so a bad argument (e.g. `step 30n`) raised an uncaught `ValueError`
+    instead of printing a clean `[ERROR]`. Moved the parse inside the
+    guarded closure and switched to `int(arg, 0)` so hex step counts
+    (`step 0x1e`) also work, matching every other command's addr/data
+    parsing convention in this file.
+  - Verified both via `--dry-run` (no hardware needed): `hexdump`
+    produces correctly-addressed 4-per-line output on both the CLI and
+    shell entry points; `step 30n` now errors cleanly, `step 0x5` and
+    `step 3` both step correctly.

@@ -49,4 +49,4 @@ extension in VSCode.
 | `testbench.test_basic` | Basic addi/add sanity check |
 | `testbench.test_full` | Full RV32I coverage: all 27 checks, x5-x30 == 1 |
 
-> Note: the hardware register debugger (`software/reg_debugger.py` and `software/reg_debugger_shell.py`) can be used to verify `testbench.test_full`. Continuous run via `resume` is unreliable in this setup and can make `test_full` fail, due to synchronous memory read behavior in the debugger path. The failure is not simply from batching `step` commands; it is tied to the sync read timing, so update debugger usage and tests accordingly.
+> Note: the hardware register debugger (`tools/reg_debugger.py` and `tools/reg_debugger_shell.py`) can be used to verify `testbench.test_full`. Continuous run via `resume` is unreliable in this setup and can make `test_full` fail, due to synchronous memory read behavior in the debugger path. The failure is not simply from batching `step` commands; it is tied to the sync read timing, so update debugger usage and tests accordingly.

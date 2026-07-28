@@ -25,3 +25,18 @@
 [2026-07-23 10:49] testbench.test_top -  total, 0 passed,  failed
 [2026-07-23 10:50] testbench.test_top -  total, 0 passed,  failed
 [2026-07-23 11:09] testbench.test_top -  total, 0 passed,  failed
+[2026-07-27 15:45] testbench.test_full -  total, 0 passed,  failed, elapsed 0m05s (5s)
+[2026-07-27 15:56] testbench.test_full - 27 total, 27 passed, 0 failed, elapsed 1m16s (76s)
+[2026-07-27 15:59] testbench.test_basic - 1 total, 1 passed, 0 failed, elapsed 0m34s (34s)
+[2026-07-27 15:59] testbench.test_diff - 7 total, 0 passed, 7 failed, elapsed 0m35s (35s)
+[2026-07-27 16:00] testbench.test_uart - 1 total, 0 passed, 1 failed, elapsed 0m56s (56s)
+[2026-07-27 16:01] testbench.test_debugger - 1 total, 0 passed, 1 failed, elapsed 0m42s (42s)
+[2026-07-27 16:02] testbench.test_bootloader - 1 total, 0 passed, 1 failed, elapsed 0m34s (34s)
+[2026-07-27 16:04] testbench.test_diff - 7 total, 7 passed, 0 failed, elapsed 0m39s (39s)
+[2026-07-27 16:04] testbench.test_uart - 1 total, 1 passed, 0 failed, elapsed 0m22s (22s)
+[2026-07-27 16:05] testbench.test_debugger - 1 total, 1 passed, 0 failed, elapsed 0m49s (49s)
+[2026-07-27 16:06] testbench.test_bootloader - 1 total, 0 passed, 1 failed, elapsed 0m40s (40s)
+[2026-07-27 16:11] testbench.test_top - 6 total, 3 passed, 3 failed, elapsed 0m56s (56s)
+[2026-07-27 16:18] testbench.test_top - 6 total, 3 passed, 3 failed, elapsed 0m52s (52s)
+[2026-07-27 16:22] testbench.test_top - 6 total, 5 passed, 1 failed, elapsed 0m33s (33s)
+[2026-07-27 16:34] testbench.test_full - 27 total, 27 passed, 0 failed, elapsed 0m29s (29s)

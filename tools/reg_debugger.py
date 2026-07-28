@@ -1,4 +1,4 @@
-# software/reg_debugger.py
+# tools/reg_debugger.py
 #
 # Host-side client for the FPGA hardware register debugger (debug_uart.sv).
 # Talks to a dedicated debug UART (separate pins/port from the program
@@ -115,6 +115,13 @@ class RegDebugger:
         self.ser.write(bytes([CMD_READ_MEM]) + struct.pack('<I', addr))
         return self._read_word()
 
+    def read_mem_range(self, addr, n):
+        """Issues n separate READ_MEM commands for consecutive 32-bit words
+        starting at byte address addr (addr, addr+4, addr+8, ...) -- there is
+        no burst-read command in the wire protocol, so this is just n
+        round-trips. Only accepted while halted, same as read_mem()."""
+        return [self.read_mem(addr + 4 * i) for i in range(n)]
+
     def load_program(self, words, base_addr=0):
         """Convenience wrapper for the hardware bootloader path: HALT, then
         one WRITE_MEM per word starting at base_addr (word-addressed, so
@@ -197,6 +204,17 @@ def print_dump(regs, pc):
     print(f"pc : 0x{pc:08x}")
 
 
+def print_hexdump(addr, words, words_per_line=4):
+    """Prints a hexdump-style view of consecutive 32-bit words: one line per
+    words_per_line words, each line labeled with the byte address of its
+    first word."""
+    for i in range(0, len(words), words_per_line):
+        line = words[i:i + words_per_line]
+        line_addr = addr + 4 * i
+        hex_part = "  ".join(f"{w:08x}" for w in line)
+        print(f"0x{line_addr:08x}:  {hex_part}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="RISC-V hardware register debugger")
     parser.add_argument("--port", "-p", required=False, default=None, help="Debug UART serial port (not needed with --dry-run)")
@@ -219,6 +237,9 @@ def main():
     wmem_p.add_argument("data", type=lambda s: int(s, 0), help="32-bit word value")
     rmem_p = sub.add_parser("read-mem", help="read one 32-bit word from memory (core must be halted)")
     rmem_p.add_argument("addr", type=lambda s: int(s, 0), help="byte address (e.g. 0x1000)")
+    hexdump_p = sub.add_parser("hexdump", help="read N consecutive 32-bit words starting at addr (core must be halted)")
+    hexdump_p.add_argument("addr", type=lambda s: int(s, 0), help="starting byte address (e.g. 0x1000)")
+    hexdump_p.add_argument("n", type=int, help="number of consecutive 32-bit words to read")
     load_p = sub.add_parser("load", help="halt, load a .bin or .mif program via WRITE_MEM word-by-word, leave halted")
     load_p.add_argument("file", help="path to a raw binary (.bin) or Quartus .mif image")
     load_p.add_argument("--base", type=lambda s: int(s, 0), default=0, help="base byte address (default 0)")
@@ -257,6 +278,9 @@ def main():
         elif args.cmd == "read-mem":
             val = dbg.read_mem(args.addr)
             print(f"0x{args.addr:08x}: 0x{val:08x} ({val})")
+        elif args.cmd == "hexdump":
+            words = dbg.read_mem_range(args.addr, args.n)
+            print_hexdump(args.addr, words)
         elif args.cmd == "load":
             words = load_words_from_file(args.file, trim_trailing_zeros=not args.no_trim)
             dbg.load_program(words, base_addr=args.base)

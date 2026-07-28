@@ -37,6 +37,7 @@ CLK_PER_BIT_EXT = 434
 CMD_HALT     = 0x01
 CMD_RESUME   = 0x02
 CMD_STEP     = 0x03
+CMD_READ_REG = 0x04
 CMD_READ_PC  = 0x05
 
 
@@ -222,3 +223,85 @@ async def test_single_cycle_core_smoke(dut):
     )
 
     cocotb.log.info("Single-cycle core smoke PASSED")
+
+
+@cocotb.test()
+async def test_step_reliability(dut):
+    """Regression test for the real-hardware bug this session's fix
+    addresses: with dp_ram_model's REGISTERED_ADDR=1 (matching real BRAM's
+    registered-address read latency), mem_stall_ctrl must hold the core
+    halted until the fetched instruction is actually valid, so STEP
+    reliably advances pc by exactly one instruction every single time --
+    not ~1/3 of the time as observed pre-fix. Only meaningful under
+    CORE_TYPE=SINGLE_CYCLE (see module docstring); the pipelined core's own
+    per-stage memory-timing fix is a separate follow-up
+    (docs/04_pipeline_plan.md §4/§6.1), so this test doesn't attempt to
+    validate step behavior there."""
+    cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
+    await reset_top(dut)
+
+    words = assemble("test_full.asm")
+    load_program(dut, words)
+
+    dut.SW.value = 1  # route ext_rx/ext_tx to the debug UART
+    await ClockCycles(dut.CLOCK_50, 4)
+
+    # debug_uart.sv halts on reset by default -- core hasn't moved yet.
+    prev_pc = dut.g_core.u_core.pc.value.to_unsigned()
+    assert prev_pc == 0, f"core advanced before any STEP: pc=0x{prev_pc:08x}"
+
+    for i in range(200):
+        await dbg_send_byte(dut, CMD_STEP)
+        await ClockCycles(dut.CLOCK_50, 20)  # let mem_stall_ctrl settle
+        pc = dut.g_core.u_core.pc.value.to_unsigned()
+        assert pc == prev_pc + 4, (
+            f"STEP #{i} did not advance pc by exactly 4: "
+            f"0x{prev_pc:08x} -> 0x{pc:08x}"
+        )
+        prev_pc = pc
+
+    cocotb.log.info("Step reliability PASSED")
+
+
+@cocotb.test()
+async def test_resume_correctness(dut):
+    """Regression test for the RESUME-path counterpart of
+    test_step_reliability: with REGISTERED_ADDR=1, letting the core run
+    freely via RESUME must still produce the same architectural end-state
+    as single-stepping through the whole program -- pre-fix, RESUME would
+    settle into a persistently wrong steady state instead. Only meaningful
+    under CORE_TYPE=SINGLE_CYCLE."""
+    cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
+    await reset_top(dut)
+
+    words = assemble("test_full.asm")
+    load_program(dut, words)
+    loop_pc = (len(words) - 1) * 4  # test_full.asm's trailing self-loop word
+
+    dut.SW.value = 1  # route ext_rx/ext_tx to the debug UART
+    await ClockCycles(dut.CLOCK_50, 4)
+
+    await dbg_send_byte(dut, CMD_RESUME)
+
+    # Poll pc until it parks on the trailing self-loop, with a generous
+    # timeout as a safety net against a genuine hang.
+    for _ in range(2000):
+        await ClockCycles(dut.CLOCK_50, 10)
+        pc = dut.g_core.u_core.pc.value.to_unsigned()
+        if pc == loop_pc:
+            break
+    else:
+        assert False, f"core never converged on trailing self-loop (last pc=0x{pc:08x})"
+
+    await dbg_send_byte(dut, CMD_HALT)
+    await ClockCycles(dut.CLOCK_50, 20)
+
+    # test_full.asm's own contract: every general-purpose register it
+    # touches (x5-x30) ends up == 1 once the program has fully run.
+    for reg in range(5, 31):
+        await dbg_send_byte(dut, CMD_READ_REG)
+        await dbg_send_byte(dut, reg)
+        got = await dbg_recv_word(dut)
+        assert got == 1, f"x{reg} = {got} after RESUME convergence, expected 1"
+
+    cocotb.log.info("Resume correctness PASSED")

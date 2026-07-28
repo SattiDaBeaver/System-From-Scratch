@@ -86,6 +86,12 @@ module riscv_top #(
     logic [31:0] pc_dbg;
     logic        halt;
 
+    // req/vld memory handshake -- only riscv_core (PIPELINED) has these
+    // ports; for CORE_TYPE=SINGLE_CYCLE dmem_req is tied to dmem_re below
+    // so dmem_rvalid's trigger is unchanged from today for that branch.
+    logic        imem_req;
+    logic        dmem_req;
+
     // Debug-UART-driven BRAM port B access (hardware bootloader) -- see
     // the BRAM port B mux below.
     logic [31:0] dbg_mem_addr;
@@ -134,6 +140,43 @@ module riscv_top #(
 
     assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
     assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
+
+    // ──────────────────────────────────────
+    //  Memory-read valid tracking (real BRAM registers its read address,
+    //  so imem_rdata/bram_rd_data lag imem_addr/dmem_addr by one cycle --
+    //  see mem_stall_ctrl below.)
+    // ──────────────────────────────────────
+    logic imem_rvalid;
+    logic dmem_rvalid;
+    logic core_halt;
+
+    always_ff @(posedge clk) begin
+        imem_rvalid <= 1'b1;      // imem is read every non-halted cycle --
+                                   // KNOWN BUG under REGISTERED_ADDR=1 (see
+                                   // docs/04_pipeline_plan.md §6.2): doesn't
+                                   // actually track the 1-cycle address-
+                                   // register latency, just claims fetched
+                                   // data is always valid. Can't naively fix
+                                   // to "imem_rvalid <= imem_req" because
+                                   // SINGLE_CYCLE's branch ties imem_req to
+                                   // 1'b0 unconditionally, which would hang
+                                   // mem_stall_ctrl in FETCH_WAIT forever.
+        dmem_rvalid <= dmem_req;  // generalized from dmem_re so stores also
+                                   // get a completion pulse (see dmem_req
+                                   // generate-branch assigns below); a no-op
+                                   // for mem_stall_ctrl, which only samples
+                                   // dmem_rvalid while dmem_re is asserted
+    end
+
+    mem_stall_ctrl u_mem_stall_ctrl (
+        .clk         (clk),
+        .rst         (rst),
+        .dbg_halt    (halt),
+        .imem_rvalid (imem_rvalid),
+        .dmem_re     (dmem_re),
+        .dmem_rvalid (dmem_rvalid),
+        .core_halt   (core_halt)
+    );
 
     // ──────────────────────────────────────
     //  Load Data Mux
@@ -258,12 +301,19 @@ module riscv_top #(
     // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
+    // core_halt (from mem_stall_ctrl above) only guarantees correct memory
+    // timing for CORE_TYPE=SINGLE_CYCLE today -- freezing the whole core
+    // for the BRAM's registered-address latency doesn't map onto the
+    // pipelined core's per-stage IF/MEM timing, which still needs its own
+    // fix (see docs/04_pipeline_plan.md §4/§6.1).
     generate
         if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
+            assign imem_req = 1'b0;
+            assign dmem_req = dmem_re;  // preserves dmem_rvalid's original trigger
             riscv_core_single_cycle u_core (
                 .clk        (clk),
                 .rst        (rst),
-                .halt       (halt & KEY[1]),
+                .halt       (core_halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
                 .dmem_addr  (dmem_addr),
@@ -283,11 +333,15 @@ module riscv_top #(
                 .halt       (halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
+                .imem_req   (imem_req),
+                .imem_vld   (imem_rvalid),
                 .dmem_addr  (dmem_addr),
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
                 .ld_data    (ld_data),
+                .dmem_req   (dmem_req),
+                .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
                 .pc_dbg     (pc_dbg),
