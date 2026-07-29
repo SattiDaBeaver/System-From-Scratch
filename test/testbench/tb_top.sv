@@ -32,7 +32,11 @@ module tb_top #(
     output logic [9:0] LEDR,
 
     input  logic        ext_rx,  // mirrors ARDUINO_IO[0]
-    output logic        ext_tx   // mirrors ARDUINO_IO[1]
+    output logic        ext_tx,  // mirrors ARDUINO_IO[1]
+
+    output logic        VGA_HS,
+    output logic        VGA_VS,
+    output logic        VGA_mono
 );
 
     // ──────────────────────────────────────
@@ -46,9 +50,13 @@ module tb_top #(
     assign clk50 = CLOCK_50;
     assign rst   = ~KEY[0];
 
+    // Free-running, NOT gated by rst -- mirrors fpga/riscv_top.sv's fix.
+    // Downstream sync-reset blocks (e.g. debug_uart's halt<=1'b1 on reset)
+    // need a clk edge while rst is asserted to actually latch; gating this
+    // divider on rst froze clk at 0 for the whole reset window, so they
+    // never did.
     always_ff @(posedge clk50) begin
-        if (rst) clk_div_toggle <= 1'b0;
-        else     clk_div_toggle <= ~clk_div_toggle;
+        clk_div_toggle <= ~clk_div_toggle;
     end
 
     assign clk = clk_div_toggle;  // CLOCK_50 / 2 = 25MHz
@@ -115,38 +123,46 @@ module tb_top #(
     // ──────────────────────────────────────
     logic bram_sel;
     logic uart_sel;
+    logic vga_sel;
 
     assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
     assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
+    assign vga_sel  = (dmem_addr[31:16] == 16'h2000);   // 0x20000000 - 0x2000FFFF
 
     // ──────────────────────────────────────
-    //  Memory-read valid tracking (mirrors fpga/riscv_top.sv -- see
-    //  mem_stall_ctrl below.)
+    //  Memory-read valid tracking (mirrors fpga/riscv_top.sv -- feeds both
+    //  cores' native req/vld stall logic.)
     // ──────────────────────────────────────
     logic imem_rvalid;
     logic dmem_rvalid;
-    logic core_halt;
+
+    // address-changed tracking -- mirrors fpga/riscv_top.sv's fix for the
+    // KNOWN BUG in docs/04_pipeline_plan.md §6.2 (imem_rvalid hardwired
+    // 1'b1 never tracked REGISTERED_ADDR=1's one-cycle latency)
+    logic [31:0] imem_addr_prev;
+    logic        imem_addr_changed;
 
     always_ff @(posedge clk) begin
-        imem_rvalid <= 1'b1;      // imem is read every non-halted cycle
+        imem_addr_prev <= imem_addr;
+    end
+    assign imem_addr_changed = (imem_addr != imem_addr_prev);
+
+    // Combinational, not registered -- see fpga/riscv_top.sv's matching fix:
+    // imem_addr_changed already compares this cycle's address against last
+    // cycle's, so registering it again added a spurious extra cycle of
+    // stale-valid reporting right after a jump.
+    assign imem_rvalid = !imem_addr_changed;
+
+    always_ff @(posedge clk) begin
         dmem_rvalid <= dmem_req;  // generalized from dmem_re -- see fpga/riscv_top.sv
     end
-
-    mem_stall_ctrl u_mem_stall_ctrl (
-        .clk         (clk),
-        .rst         (rst),
-        .dbg_halt    (halt),
-        .imem_rvalid (imem_rvalid),
-        .dmem_re     (dmem_re),
-        .dmem_rvalid (dmem_rvalid),
-        .core_halt   (core_halt)
-    );
 
     // ──────────────────────────────────────
     //  Load Data Mux
     // ──────────────────────────────────────
     logic [31:0] bram_rd_data;
     logic [31:0] uart_rd_data;
+    logic [31:0] vga_rd_data;
 
     // UART read data mux
     always_comb begin
@@ -164,6 +180,7 @@ module tb_top #(
     always_comb begin
         if      (bram_sel) ld_data = bram_rd_data;
         else if (uart_sel) ld_data = uart_rd_data;
+        else if (vga_sel)  ld_data = vga_rd_data;
         else               ld_data = 32'b0;
     end
 
@@ -264,25 +281,44 @@ module tb_top #(
     );
 
     // ──────────────────────────────────────
+    //  VGA Framebuffer
+    // ──────────────────────────────────────
+    vga_framebuffer u_vga (
+        .clk    (clk),
+        .rst    (rst),
+        .sel    (vga_sel),
+        .addr   (dmem_addr[15:0]),
+        .wdata  (dmem_wdata),
+        .we     (dmem_we),
+        .re     (dmem_re),
+        .rdata  (vga_rd_data),
+        .hsync  (VGA_HS),
+        .vsync  (VGA_VS),
+        .mono_pixel (VGA_mono)
+    );
+
+    // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
-    // core_halt only guarantees correct memory timing for
-    // CORE_TYPE=SINGLE_CYCLE -- see fpga/riscv_top.sv.
+    // Both cores share the same req/vld memory-timing contract -- see
+    // fpga/riscv_top.sv.
     generate
         if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
-            assign imem_req = 1'b0;
-            assign dmem_req = dmem_re;  // preserves dmem_rvalid's original trigger
             riscv_core_single_cycle u_core (
                 .clk        (clk),
                 .rst        (rst),
-                .halt       (core_halt & KEY[1]),
+                .halt       (halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
+                .imem_req   (imem_req),
+                .imem_vld   (imem_rvalid),
                 .dmem_addr  (dmem_addr),
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
                 .ld_data    (ld_data),
+                .dmem_req   (dmem_req),
+                .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
                 .pc_dbg     (pc_dbg),

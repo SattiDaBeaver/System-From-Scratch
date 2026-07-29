@@ -47,9 +47,16 @@ module riscv_top #(
     assign clk50 = CLOCK_50;
     assign rst   = ~KEY[0];
 
+    // Free-running, NOT gated by rst: every downstream module's own
+    // synchronous reset (always_ff @(posedge clk) if (rst) ...) needs at
+    // least one clk edge while rst is still asserted to actually latch its
+    // reset values. Gating this divider on rst held clk_div_toggle (and
+    // therefore clk) frozen at 0 for the whole reset window, so no
+    // downstream sync-reset block ever saw a posedge to reset on -- e.g.
+    // debug_uart's halt<=1'b1 on reset silently never took effect, on
+    // hardware as well as in sim (see docs/dev_log.md).
     always_ff @(posedge clk50) begin
-        if (rst) clk_div_toggle <= 1'b0;
-        else     clk_div_toggle <= ~clk_div_toggle;
+        clk_div_toggle <= ~clk_div_toggle;
     end
 
     assign clk = clk_div_toggle;  // CLOCK_50 / 2 = 25MHz
@@ -65,11 +72,13 @@ module riscv_top #(
     // assign HEX0 = 7'h7F;
     // assign LEDR = 10'b0;
 
-    assign VGA_R  = 4'b0;
-    assign VGA_G  = 4'b0;
-    assign VGA_B  = 4'b0;
-    assign VGA_HS = 1'b1;
-    assign VGA_VS = 1'b1;
+    logic vga_hsync, vga_vsync, vga_mono_pixel;
+
+    assign VGA_R  = {4{vga_mono_pixel}};
+    assign VGA_G  = {4{vga_mono_pixel}};
+    assign VGA_B  = {4{vga_mono_pixel}};
+    assign VGA_HS = vga_hsync;
+    assign VGA_VS = vga_vsync;
 
     // ──────────────────────────────────────
     //  Core Interface Wires
@@ -137,52 +146,53 @@ module riscv_top #(
     // ──────────────────────────────────────
     logic bram_sel;
     logic uart_sel;
+    logic vga_sel;
 
     assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
     assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
+    assign vga_sel  = (dmem_addr[31:16] == 16'h2000);   // 0x20000000 - 0x2000FFFF
 
     // ──────────────────────────────────────
     //  Memory-read valid tracking (real BRAM registers its read address,
     //  so imem_rdata/bram_rd_data lag imem_addr/dmem_addr by one cycle --
-    //  see mem_stall_ctrl below.)
+    //  imem_vld/dmem_vld below feed both cores' native req/vld stall logic.)
     // ──────────────────────────────────────
     logic imem_rvalid;
     logic dmem_rvalid;
-    logic core_halt;
+
+    // imem_addr is held stable by both cores while stalled, so "did the
+    // address I'm driving into the BRAM change since last cycle" is a
+    // well-defined, core-agnostic proxy for "has the one-cycle registered
+    // read latency elapsed" -- fixes the KNOWN BUG from
+    // docs/04_pipeline_plan.md §6.2, where imem_rvalid was hardwired 1'b1
+    // and never actually tracked REGISTERED_ADDR=1 latency.
+    logic [31:0] imem_addr_prev;
+    logic        imem_addr_changed;
 
     always_ff @(posedge clk) begin
-        imem_rvalid <= 1'b1;      // imem is read every non-halted cycle --
-                                   // KNOWN BUG under REGISTERED_ADDR=1 (see
-                                   // docs/04_pipeline_plan.md §6.2): doesn't
-                                   // actually track the 1-cycle address-
-                                   // register latency, just claims fetched
-                                   // data is always valid. Can't naively fix
-                                   // to "imem_rvalid <= imem_req" because
-                                   // SINGLE_CYCLE's branch ties imem_req to
-                                   // 1'b0 unconditionally, which would hang
-                                   // mem_stall_ctrl in FETCH_WAIT forever.
-        dmem_rvalid <= dmem_req;  // generalized from dmem_re so stores also
-                                   // get a completion pulse (see dmem_req
-                                   // generate-branch assigns below); a no-op
-                                   // for mem_stall_ctrl, which only samples
-                                   // dmem_rvalid while dmem_re is asserted
+        imem_addr_prev <= imem_addr;
     end
+    assign imem_addr_changed = (imem_addr != imem_addr_prev);
 
-    mem_stall_ctrl u_mem_stall_ctrl (
-        .clk         (clk),
-        .rst         (rst),
-        .dbg_halt    (halt),
-        .imem_rvalid (imem_rvalid),
-        .dmem_re     (dmem_re),
-        .dmem_rvalid (dmem_rvalid),
-        .core_halt   (core_halt)
-    );
+    // Combinational, not registered -- imem_addr_changed already compares
+    // this cycle's address against last cycle's, so it's already the
+    // one-cycle-latency signal. Registering it again added a spurious
+    // extra cycle where imem_rvalid reported valid for stale data right
+    // after a jump (two consecutive address changes), letting the core
+    // re-execute/skip instructions around jump targets.
+    assign imem_rvalid = !imem_addr_changed;
+
+    always_ff @(posedge clk) begin
+        dmem_rvalid <= dmem_req;  // generalized from dmem_re so stores also
+                                   // get a completion pulse
+    end
 
     // ──────────────────────────────────────
     //  Load Data Mux
     // ──────────────────────────────────────
     logic [31:0] bram_rd_data;
     logic [31:0] uart_rd_data;
+    logic [31:0] vga_rd_data;
 
     // UART read data mux
     always_comb begin
@@ -200,6 +210,7 @@ module riscv_top #(
     always_comb begin
         if      (bram_sel) ld_data = bram_rd_data;
         else if (uart_sel) ld_data = uart_rd_data;
+        else if (vga_sel)  ld_data = vga_rd_data;
         else               ld_data = 32'b0;
     end
 
@@ -299,28 +310,47 @@ module riscv_top #(
     );
 
     // ──────────────────────────────────────
+    //  VGA Framebuffer
+    // ──────────────────────────────────────
+    vga_framebuffer u_vga (
+        .clk    (clk),
+        .rst    (rst),
+        .sel    (vga_sel),
+        .addr   (dmem_addr[15:0]),
+        .wdata  (dmem_wdata),
+        .we     (dmem_we),
+        .re     (dmem_re),
+        .rdata  (vga_rd_data),
+        .hsync  (vga_hsync),
+        .vsync  (vga_vsync),
+        .mono_pixel (vga_mono_pixel)
+    );
+
+    // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
-    // core_halt (from mem_stall_ctrl above) only guarantees correct memory
-    // timing for CORE_TYPE=SINGLE_CYCLE today -- freezing the whole core
-    // for the BRAM's registered-address latency doesn't map onto the
-    // pipelined core's per-stage IF/MEM timing, which still needs its own
-    // fix (see docs/04_pipeline_plan.md §4/§6.1).
+    // Both cores now share the same req/vld memory-timing contract --
+    // imem_req/imem_vld, dmem_req/dmem_vld -- so both stall internally for
+    // exactly as long as the BRAM's registered-address latency takes,
+    // instead of an external whole-core halt wrapper (see
+    // docs/04_pipeline_plan.md §4/§6.1).
     generate
         if (CORE_TYPE == "SINGLE_CYCLE") begin : g_core
-            assign imem_req = 1'b0;
-            assign dmem_req = dmem_re;  // preserves dmem_rvalid's original trigger
             riscv_core_single_cycle u_core (
                 .clk        (clk),
                 .rst        (rst),
-                .halt       (core_halt & KEY[1]),
+                .halt       (halt & KEY[1]),
                 .imem_addr  (imem_addr),
                 .imem_rdata (imem_rdata),
+                .imem_req   (imem_req),
+                .imem_vld   (imem_rvalid),
                 .dmem_addr  (dmem_addr),
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
                 .ld_data    (ld_data),
+                .dmem_req   (dmem_req),
+                .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
                 .pc_dbg     (pc_dbg),

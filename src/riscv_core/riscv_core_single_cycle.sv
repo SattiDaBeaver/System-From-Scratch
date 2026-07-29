@@ -8,6 +8,8 @@ module riscv_core_single_cycle #(
     // Instruction memory interface (read only)
     output logic [31:0] imem_addr,
     input  logic [31:0] imem_rdata,
+    output logic        imem_req,   // IF is presenting imem_addr this cycle
+    input  logic        imem_vld,   // imem_rdata is valid for imem_addr
 
     // Data memory
     output logic [31:0] dmem_addr,
@@ -15,6 +17,8 @@ module riscv_core_single_cycle #(
     output logic        dmem_we,
     output logic        dmem_re,
     input  logic [31:0] ld_data,
+    output logic        dmem_req,   // this cycle's instruction has an outstanding load/store
+    input  logic        dmem_vld,   // the op requested by dmem_req has completed
 
     // Debug interface (read only, no effect on core behavior)
     // Async indexed read instead of exposing the full regfile as a packed
@@ -39,6 +43,22 @@ module riscv_core_single_cycle #(
 
     // Branch/jump targets
     logic        taken_br;
+
+    //*************************************
+    //*  req/vld memory handshake         *
+    //*************************************
+    // Real synchronous-read memory (Quartus altsyncram, see fpga/dp_ram.v)
+    // never returns data the same cycle the address is presented. imem_req/
+    // dmem_req tell memory "here's an address, respond when ready"; vld
+    // pulses back when the corresponding rdata/ld_data is actually valid.
+    // stall holds pc/regfile writes in place for as long as either is
+    // outstanding -- same contract riscv_core.sv uses (if_wait/mem_wait),
+    // just collapsed to a single freeze signal since this core has no
+    // pipeline stages to freeze independently.
+    logic stall;
+    assign imem_req = !halt;
+    assign dmem_req = dmem_we || dmem_re;
+    assign stall    = (imem_req && !imem_vld) || (dmem_req && !dmem_vld);
 
     //********** Decoder Logic ************
     logic [31:0] instr;
@@ -107,7 +127,7 @@ module riscv_core_single_cycle #(
         if (rst) begin
             pc <= 32'b0;
         end
-        else if (!halt) begin
+        else if (!halt && !stall) begin
             if (taken_br || is_jal) pc <= br_tgt_pc;
             else if (is_jalr)       pc <= jalr_tgt_pc;
             else                    pc <= pc + 32'd4;
@@ -291,7 +311,7 @@ module riscv_core_single_cycle #(
 
     // Write port
     always_ff @(posedge clk) begin
-        if (wr_en && (rd != 5'b0) && !halt)
+        if (wr_en && (rd != 5'b0) && !halt && !stall)
             regfile[rd] <= wr_data;
     end
 

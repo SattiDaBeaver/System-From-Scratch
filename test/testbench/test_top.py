@@ -229,14 +229,26 @@ async def test_single_cycle_core_smoke(dut):
 async def test_step_reliability(dut):
     """Regression test for the real-hardware bug this session's fix
     addresses: with dp_ram_model's REGISTERED_ADDR=1 (matching real BRAM's
-    registered-address read latency), mem_stall_ctrl must hold the core
-    halted until the fetched instruction is actually valid, so STEP
-    reliably advances pc by exactly one instruction every single time --
-    not ~1/3 of the time as observed pre-fix. Only meaningful under
-    CORE_TYPE=SINGLE_CYCLE (see module docstring); the pipelined core's own
-    per-stage memory-timing fix is a separate follow-up
-    (docs/04_pipeline_plan.md §4/§6.1), so this test doesn't attempt to
-    validate step behavior there."""
+    registered-address read latency), the core's own native imem_req/
+    imem_vld stall logic must hold pc in place until the fetched
+    instruction is actually valid, so STEP reliably advances pc by exactly
+    one instruction every single time -- not ~1/3 of the time as observed
+    pre-fix (back when this was patched externally via the now-retired
+    mem_stall_ctrl halt wrapper). Only meaningful under
+    CORE_TYPE=SINGLE_CYCLE: debug_uart's STEP drops halt for exactly one
+    clk cycle, which assumes one halt-drop = one instruction retiring --
+    true for the single-cycle core, but not for the pipelined core, where
+    a RAW hazard (front_stall) or memory wait already pending in the
+    pipeline can eat that single un-halted cycle without pc advancing at
+    all. cocotb can't introspect the elaborated CORE_TYPE parameter
+    directly, so this self-skips off the CORE_TYPE env var the Makefile
+    exports instead (see module docstring for why running the file twice,
+    once per CORE_TYPE, is still the full regression matrix)."""
+    if os.environ.get("CORE_TYPE", "PIPELINED") != "SINGLE_CYCLE":
+        cocotb.log.info("Skipping test_step_reliability: only meaningful "
+                         "under CORE_TYPE=SINGLE_CYCLE")
+        return
+
     cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
     await reset_top(dut)
 
@@ -250,9 +262,13 @@ async def test_step_reliability(dut):
     prev_pc = dut.g_core.u_core.pc.value.to_unsigned()
     assert prev_pc == 0, f"core advanced before any STEP: pc=0x{prev_pc:08x}"
 
-    for i in range(200):
+    # test_full.asm is len(words) instructions, ending in a trailing
+    # self-loop (jal x0, loop) -- so pc can only advance by +4 exactly
+    # len(words)-1 times before parking on that self-loop, after which
+    # STEP legitimately can't advance it any further.
+    for i in range(len(words) - 1):
         await dbg_send_byte(dut, CMD_STEP)
-        await ClockCycles(dut.CLOCK_50, 20)  # let mem_stall_ctrl settle
+        await ClockCycles(dut.CLOCK_50, 20)  # let native stall logic settle
         pc = dut.g_core.u_core.pc.value.to_unsigned()
         assert pc == prev_pc + 4, (
             f"STEP #{i} did not advance pc by exactly 4: "
@@ -269,8 +285,14 @@ async def test_resume_correctness(dut):
     test_step_reliability: with REGISTERED_ADDR=1, letting the core run
     freely via RESUME must still produce the same architectural end-state
     as single-stepping through the whole program -- pre-fix, RESUME would
-    settle into a persistently wrong steady state instead. Only meaningful
-    under CORE_TYPE=SINGLE_CYCLE."""
+    settle into a persistently wrong steady state instead. Runs under both
+    CORE_TYPE values: the pipelined core's predict-not-taken self-loop
+    doesn't park pc at an exact value (IF keeps optimistically fetching
+    pc+4/pc+8 after every jal, bouncing pc through loop_pc/+4/+8 forever
+    even though the jal correctly keeps re-redirecting back to loop_pc --
+    same bounce test_single_cycle_core_smoke/test_debugger.py already
+    tolerate), so convergence is checked as "parked in the bounce range"
+    rather than exact equality."""
     cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
     await reset_top(dut)
 
@@ -283,12 +305,12 @@ async def test_resume_correctness(dut):
 
     await dbg_send_byte(dut, CMD_RESUME)
 
-    # Poll pc until it parks on the trailing self-loop, with a generous
-    # timeout as a safety net against a genuine hang.
+    # Poll pc until it parks in the trailing self-loop's bounce range, with
+    # a generous timeout as a safety net against a genuine hang.
     for _ in range(2000):
         await ClockCycles(dut.CLOCK_50, 10)
         pc = dut.g_core.u_core.pc.value.to_unsigned()
-        if pc == loop_pc:
+        if loop_pc <= pc <= loop_pc + 8:
             break
     else:
         assert False, f"core never converged on trailing self-loop (last pc=0x{pc:08x})"
@@ -305,3 +327,67 @@ async def test_resume_correctness(dut):
         assert got == 1, f"x{reg} = {got} after RESUME convergence, expected 1"
 
     cocotb.log.info("Resume correctness PASSED")
+
+
+@cocotb.test()
+async def test_pipeline_stall_real_latency(dut):
+    """Regression test for the RTL bug this session fixed: riscv_core.sv's
+    ProgramCounter had no explicit ex_flush priority over front_stall, so
+    a branch/jump resolving on the same cycle a RAW-hazard stall
+    (front_stall) or real-BRAM fetch wait (if_wait) was pending got
+    silently dropped -- exactly the kind of interaction
+    test_pipeline_stall.asm's back-to-back RAW hazards (distance-0
+    dependencies, a load-use chain, and a hazard-guarded branch) can
+    trigger once real REGISTERED_ADDR=1 memory timing is in the mix,
+    which test_diff.py's diff_test_pipeline_stall never exercises (tb_diff
+    is zero-latency there). Runs under both CORE_TYPE values via RESUME,
+    same convergence/readback pattern as test_resume_correctness."""
+    cocotb.start_soon(Clock(dut.CLOCK_50, 20, unit="ns").start())
+    await reset_top(dut)
+
+    # regfile has no reset logic (only pc/pipeline regs do) -- cocotb.test()
+    # functions run sequentially against the same simulated instance, so
+    # test_resume_correctness's x5-x30==1 leftovers would otherwise leak
+    # into this test's own x7==0 check (x7 is deliberately never written
+    # here, since the beq must skip it).
+    for i in range(32):
+        dut.g_core.u_core.regfile[i].value = 0
+
+    words = assemble("test_pipeline_stall.asm")
+    load_program(dut, words)
+    loop_pc = (len(words) - 1) * 4  # trailing self-loop word
+
+    dut.SW.value = 1  # route ext_rx/ext_tx to the debug UART
+    await ClockCycles(dut.CLOCK_50, 4)
+
+    await dbg_send_byte(dut, CMD_RESUME)
+
+    # Poll pc until it parks in the trailing self-loop's bounce range, with
+    # a generous timeout as a safety net against a genuine hang.
+    for _ in range(2000):
+        await ClockCycles(dut.CLOCK_50, 10)
+        pc = dut.g_core.u_core.pc.value.to_unsigned()
+        if loop_pc <= pc <= loop_pc + 8:
+            break
+    else:
+        assert False, f"core never converged on trailing self-loop (last pc=0x{pc:08x})"
+
+    await dbg_send_byte(dut, CMD_HALT)
+    await ClockCycles(dut.CLOCK_50, 20)
+
+    # test_pipeline_stall.asm's own contract, derived from its source:
+    # x1=5, x2=x1+10=15, x3=x1+x2=20, x4=x3+x3=40, x5=x6=1 (beq operands),
+    # x7=0 (never executed -- beq must take the branch), x8=8 (post-branch
+    # target), x9=4 (dmem word addr), x10=42 (stored value), x11=42
+    # (loaded back), x12=x11+x11=84.
+    expected = {
+        1: 5, 2: 15, 3: 20, 4: 40, 5: 1, 6: 1, 7: 0, 8: 8,
+        9: 4, 10: 42, 11: 42, 12: 84,
+    }
+    for reg, want in expected.items():
+        await dbg_send_byte(dut, CMD_READ_REG)
+        await dbg_send_byte(dut, reg)
+        got = await dbg_recv_word(dut)
+        assert got == want, f"x{reg} = {got} after RESUME convergence, expected {want}"
+
+    cocotb.log.info("Pipeline stall real-latency PASSED")

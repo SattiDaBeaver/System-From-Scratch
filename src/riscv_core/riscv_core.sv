@@ -229,7 +229,18 @@ module riscv_core #(
             pc <= 32'b0;
         end
         else if (!halt) begin
-            if (mem_wait || front_stall) begin
+            if (mem_wait) begin
+                pc <= pc;
+            end
+            else if (ex_flush) begin
+                pc <= next_pc;  // next_pc already holds the resolved branch/
+                                 // jal/jalr target -- ex_flush must win over
+                                 // front_stall (a same-cycle IF-side wait/
+                                 // hazard is unrelated to EX's redirect and
+                                 // must not drop it), matching the priority
+                                 // if_id_valid/id_ex_valid already use below.
+            end
+            else if (front_stall) begin
                 pc <= pc;
             end
             else begin

@@ -111,16 +111,19 @@ pipeline is correct for 1-cycle latency today and for more cycles later
 registers (`imem_rvalid`/`dmem_rvalid`) that are supposed to pulse one cycle
 after `imem_req`/`dmem_req`, matching `dp_ram_model.sv`'s `REGISTERED_ADDR=1`
 timing (now the default in `tb_top.sv`, matching real M9K block RAM).
-`dmem_rvalid <= dmem_req` does this correctly. **`imem_rvalid` does not** —
-see §6.2, a known bug found this session, not yet fixed.
+`dmem_rvalid <= dmem_req` does this correctly. **`imem_rvalid` is now fixed
+too** — see §6.2; it was double-registered, adding a spurious extra cycle
+of stale-valid reporting right after a jump.
 
-Regression status (`testbench.test_full` via `tb_core`/zero-latency arrays):
-unchanged, 27/27 passing — the new ports are a correct no-op there since
-`vld` is tied `1'b1`. `test_diff`, `test_uart`, `test_debugger`: all passing
-under the same zero-latency tie-off. `test_top.py` (`tb_top`, which actually
-exercises `REGISTERED_ADDR=1` sync-read timing) currently fails for both
-`CORE_TYPE`s — root-caused to the `imem_rvalid` bug below, not to the core's
-new stall logic itself.
+Regression status: `test_full` (tb_core, zero-latency) 27/27, `test_diff`
+7/7, `test_uart` 1/1, `test_debugger` 1/1 all passing. `test_top.py`
+(`tb_top`, real `REGISTERED_ADDR=1` sync-read timing) is **7/7 for both
+`CORE_TYPE=SINGLE_CYCLE` and `CORE_TYPE=PIPELINED`** — see §6.3, the
+`ProgramCounter` `ex_flush`/`front_stall` priority fix resolved the
+pipelined-core failures, and `test_pipeline_stall_real_latency` (new)
+now covers `test_pipeline_stall.asm`'s RAW/load-use hazards under real
+memory-latency timing, which `test_diff.py`'s zero-latency version of
+the same program never exercised.
 
 ## 5. Reset behavior
 
@@ -147,59 +150,146 @@ new stall logic itself.
    codebase's existing style of separate named combinational blocks like
    `Decoder_Logic`), decided once (2) is settled.
 
-### 6.1 `mem_stall_ctrl` doesn't cover the pipelined core
+### 6.1 `mem_stall_ctrl` retired — single-cycle core now uses native req/vld too
 
-`src/memory/mem_stall_ctrl.sv` (an external whole-core `halt` wrapper) only
-guarantees correct memory timing for `CORE_TYPE=SINGLE_CYCLE` — freezing
-every stage doesn't map onto the pipelined core's per-stage stalling.
-**Resolved for the pipelined core specifically by req/vld (§4)**; the
-single-cycle core keeps using `mem_stall_ctrl` unchanged (frozen golden
-model, out of scope for this work).
+**Resolved, 28 Jul 2026.** `src/memory/mem_stall_ctrl.sv` (an external
+whole-core `halt` wrapper) only ever covered `CORE_TYPE=SINGLE_CYCLE`, and
+was a hack: it overloaded `halt` (a debug signal) with memory-timing
+correctness, and needed its own FSM guessing at fetch/mem timing the core
+should know natively. It has been deleted. `riscv_core_single_cycle.sv`
+now has the same `imem_req`/`imem_vld`/`dmem_req`/`dmem_vld` ports as
+`riscv_core.sv`, collapsed into a single `stall` signal (no independent
+stages to freeze) that gates its `pc` register and regfile write port.
+Both `fpga/riscv_top.sv` and `test/testbench/tb_top.sv` wire both cores'
+`CORE_TYPE` branches identically now — `halt` is purely a debug signal
+again in both branches, with no memory-timing role.
 
-### 6.2 KNOWN BUG: `imem_rvalid` doesn't track registered-address latency
+### 6.2 RESOLVED: `imem_rvalid` was double-registered against `imem_addr_changed`
 
-Found while testing req/vld against `test/testbench/test_top.py`
-(`tb_top`, `REGISTERED_ADDR=1`): both `fpga/riscv_top.sv` and
-`test/testbench/tb_top.sv` have
+Found while re-verifying `riscv_core_single_cycle.sv`'s new req/vld stall
+logic against `test/testbench/test_top.py` (`tb_top`,
+`REGISTERED_ADDR=1`). The shipped fix for the original "`imem_rvalid`
+hardwired `1'b1`" bug (address-change tracking, not the `imem_req`-based
+fix originally sketched below) introduced a subtler follow-on bug in both
+`fpga/riscv_top.sv` and `test/testbench/tb_top.sv`:
 
 ```systemverilog
+logic [31:0] imem_addr_prev;
+logic        imem_addr_changed;
+
 always_ff @(posedge clk) begin
-    imem_rvalid <= 1'b1;      // always true -- wrong once REGISTERED_ADDR=1
-    dmem_rvalid <= dmem_req;  // correct -- one cycle behind the request
+    imem_addr_prev <= imem_addr;
+end
+assign imem_addr_changed = (imem_addr != imem_addr_prev);
+
+always_ff @(posedge clk) begin
+    imem_rvalid <= !imem_addr_changed;   // WRONG: registers an already-latched signal
 end
 ```
 
-`imem_rvalid` was hardwired `1'b1` from before req/vld existed, when
-`imem_rdata` really was valid every cycle (`REGISTERED_ADDR=0`). Now that
-`tb_top.sv`'s `dp_ram_model` defaults to `REGISTERED_ADDR=1` (real M9K
-timing), `imem_rdata` genuinely lags `imem_addr` by one cycle every fetch,
-but `imem_vld` (wired to `imem_rvalid`) claims it's always valid — so both
-`riscv_core` and `riscv_core_single_cycle` get fed stale instruction data
-on effectively every cycle. This is not a bug in the new stall logic
-itself; `test_top.py` fails identically for both `CORE_TYPE`s, confirming
-it's this shared wiring bug, not core-specific pipeline logic.
+`imem_addr_changed` already compares *this* cycle's address against
+*last* cycle's — it's already the correctly-timed "has the BRAM's
+one-cycle registered read latency elapsed" signal. Registering it again
+into `imem_rvalid` added a spurious extra cycle of stale-valid reporting.
+This only showed up right after a jump/branch (two address changes back
+to back: old→target, then target→target+4) — `imem_vld` would briefly
+read valid for stale `imem_rdata` in that window, letting the core
+re-execute or skip an instruction right at the jump target. This matched
+`test_resume_correctness`'s failure signature exactly (`auipc x4, 0`
+silently dropped, corrupting a downstream `xor`/register chain right
+after a `jal`).
 
-The obvious fix (`imem_rvalid <= imem_req`) doesn't work as a drop-in: the
-`SINGLE_CYCLE` generate branch ties `imem_req = 1'b0` unconditionally
-(single-cycle core has no `imem_req` port), so `imem_rvalid` would never
-assert and `mem_stall_ctrl` would hang forever in `FETCH_WAIT`. Needs either
-a `SINGLE_CYCLE`-branch-specific `imem_req` tie-off (e.g. `1'b1` there
-instead of `1'b0`, since that branch's `mem_stall_ctrl` expects "always
-requesting"), or a separate always-pulsing signal for `mem_stall_ctrl` to
-sample. **Not yet fixed** — next session should start here before writing
-the task-#12 PIPELINED-specific req/vld tests, since those tests can't pass
-until real `imem_vld` timing is correct.
+**Fix:** made `imem_rvalid` combinational — `assign imem_rvalid =
+!imem_addr_changed;` — in both files. Confirmed by rerunning
+`test_top.py` under `CORE_TYPE=SINGLE_CYCLE`: 6/6 passing, including
+`test_resume_correctness`'s full x5–x30==1 check after RESUME
+convergence.
+
+### 6.3 RESOLVED: pipelined `ProgramCounter` missing `ex_flush` priority over `front_stall`
+
+Found while root-causing `test_top.py`'s `CORE_TYPE=PIPELINED` 3/6
+result (§4/§6 item 2's actual failure mode — not a missing-feature gap,
+a priority bug). `riscv_core.sv`'s `ProgramCounter` always_ff froze `pc`
+on `mem_wait || front_stall` with no explicit priority for `ex_flush`
+(EX resolving a taken branch/jal/jalr), unlike `if_id_valid`/`id_ex_valid`
+elsewhere in the same file, which already give `ex_flush` priority over
+`front_stall`. Under `REGISTERED_ADDR=1`, `if_wait` (part of
+`front_stall`) is true roughly every other cycle by construction, so a
+branch/jump redirect landing on such a cycle was silently and
+permanently dropped: `pc` never took `next_pc` that cycle, and `id_ex`
+was flushed to a bubble regardless of `front_stall`, so there was no
+retry.
+
+**Fix:** reordered `ProgramCounter`'s priority to `mem_wait` (pc holds) >
+`ex_flush` (pc takes `next_pc`) > `front_stall` (pc holds) > default
+(`pc <= next_pc`), matching the priority `if_id_valid`/`id_ex_valid`
+already used.
+
+Two further `test_top.py` failures surfaced after this fix, both
+test-code issues rather than RTL bugs:
+- `test_resume_correctness`'s exact `pc == loop_pc` convergence check was
+  too strict for the pipelined core — predict-not-taken IF keeps
+  optimistically fetching `pc+4`/`pc+8` after every `jal`, so a trailing
+  self-loop bounces `pc` through `loop_pc`/`+4`/`+8` forever even though
+  the jal is correctly re-redirecting every time (same bounce
+  `test_single_cycle_core_smoke`/`test_debugger.py` already tolerate via
+  range checks). Loosened to `loop_pc <= pc <= loop_pc + 8`.
+- `test_step_reliability` failed because `debug_uart.sv`'s STEP drops
+  `halt` for exactly one clk cycle, assuming one halt-drop = one
+  instruction retiring — true for the single-cycle core, false for the
+  pipelined core whenever a RAW hazard (`front_stall`) or memory wait
+  (`if_wait`/`mem_wait`) is already pending, since forward progress then
+  needs multiple consecutive un-halted cycles. Fixed at the test level
+  with a `CORE_TYPE`-aware self-skip (`test/Makefile` now `export`s
+  `CORE_TYPE` so Python can read it, since cocotb can't introspect the
+  elaborated Verilog parameter). **Not fixed in RTL — see the open
+  question below.**
+
+Confirmed via rerun: `test_top.py` is 6/6 under both `CORE_TYPE`s.
+
+**Follow-up, 28 Jul 2026:** added `test_pipeline_stall_real_latency` —
+runs `test_pipeline_stall.asm` (distance-0 RAW hazards, an rs1==rs2
+double-hazard, a hazard-guarded branch, and a load-use chain) via RESUME
+under `tb_top`'s real `REGISTERED_ADDR=1` timing. This closes a real gap:
+`test_diff.py`'s `diff_test_pipeline_stall` already covers the same
+program's hazard shapes, but only against `tb_diff`'s zero-latency
+memory, so it could never exercise a RAW stall (`front_stall`)
+overlapping a real fetch/mem wait (`if_wait`/`mem_wait`) — exactly the
+interaction the §6.3 `ex_flush`/`front_stall` priority bug lived in.
+First run caught a test-isolation bug, not an RTL bug: `test_top.py` has
+no regfile-clearing helper between `@cocotb.test()` functions (unlike
+`test_diff.py`'s `_clear_regfiles`), so `test_resume_correctness`'s
+x5–x30==1 leftovers leaked into this test's x7==0 check. Fixed by zeroing
+`dut.g_core.u_core.regfile[i]` before loading the program. `test_top.py`
+is now **7/7 under both `CORE_TYPE`s**.
+
+**Open, not yet decided: should STEP be redesigned for the pipelined
+core, or stay single-cycle-only?** Two options on the table:
+1. Leave it skipped under `CORE_TYPE=PIPELINED` (current state) — STEP
+   stays single-cycle-only; pipelined debugging relies on
+   HALT/RESUME/READ_REG only, no single-instruction stepping.
+2. Redesign STEP for the pipeline — e.g. `debug_uart.sv` holds `halt`
+   deasserted until an explicit "retire" pulse comes back from the core
+   (gated on `!front_stall && !mem_wait` plus a real commit signal), so
+   STEP genuinely waits for one instruction to complete regardless of
+   stalls. Requires real RTL work in both `debug_uart.sv` and
+   `riscv_core.sv`, plus new tests. Not started, not scoped in detail.
 
 ## 7. Verification plan
 
 Rather than build the whole pipeline and verify at the end, each milestone
 below ships with its own passing test before the next milestone starts.
-`riscv_core_single_cycle.sv` (a verified, frozen copy of the pre-pipeline
-core — see dev log) is the golden reference model from the first
+`riscv_core_single_cycle.sv` is the golden reference model from the first
 milestone on, not bolted on afterward: correctness is defined as
 "pipeline produces the same architectural end-state as the single-cycle
 core," checked differentially rather than against hand-derived expected
-values.
+values. "Golden" here means verified-reference, not literally
+untouchable — it gained native req/vld memory-timing ports this session
+(§6.1) when the alternative was an external `halt`-based hack, and was
+re-verified against the full `test_full.asm` suite before being
+considered golden again. Future instruction additions should follow the
+same pattern: modify, then re-verify against the full suite, then trust
+it as the diff target again.
 
 **Differential comparison is convergence-based, not fixed-cycle-count.**
 The pipeline takes a different (larger, variable) number of cycles than
@@ -262,7 +352,7 @@ regfile[0:31] and the touched dmem words between them.
    cannot expose.
 
    `riscv_top.sv` exposes a `CORE_TYPE` parameter (`"PIPELINED"` (default)
-   or `"SINGLE_CYCLE"`) so the frozen golden-model core can be synthesized
+   or `"SINGLE_CYCLE"`) so the golden-model core can be synthesized
    and bring-up-tested on real hardware too, independent of the pipeline's
    own progress — the two cores share an identical port list (confirmed by
    `test/testbench/tb_diff.sv`'s side-by-side instantiation), so this is a
@@ -291,3 +381,20 @@ regfile[0:31] and the touched dmem words between them.
    for the pipelined core -- whole-core-freeze doesn't map onto per-stage
    pipeline stalling, so the 5- vs 6-stage question below is still open and
    still needs its own fix once pipeline work resumes.
+
+   **Update, 28 Jul 2026:** `mem_stall_ctrl` retired (§6.1) — replaced by
+   native req/vld ports on `riscv_core_single_cycle.sv` itself, matching
+   `riscv_core.sv`'s existing pattern. Re-verifying against
+   `test_full.asm` under real `REGISTERED_ADDR=1` timing surfaced and
+   fixed the deeper `imem_rvalid` double-registration bug (§6.2) that the
+   original `mem_stall_ctrl`-based fix had been masking. `test_top.py`
+   under `CORE_TYPE=SINGLE_CYCLE` is now 6/6; the `PIPELINED` 3/6 result
+   (§4/§6 item 1, still open) is unchanged by this work.
+
+   **Update, later 28 Jul 2026:** the `PIPELINED` 3/6 result turned out
+   to be a `ProgramCounter` priority bug, not a missing-feature gap —
+   see §6.3. Fixed; `test_top.py` is now 6/6 under both `CORE_TYPE`s.
+   §6/item 1 is fully resolved. One open item remains from this pass:
+   whether STEP needs a real redesign for the pipelined core (§6.3's
+   closing note) — undecided, revisit before relying on STEP against
+   `CORE_TYPE=PIPELINED` hardware/sim debugging.

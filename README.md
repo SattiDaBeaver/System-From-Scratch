@@ -50,3 +50,17 @@ extension in VSCode.
 | `testbench.test_full` | Full RV32I coverage: all 27 checks, x5-x30 == 1 |
 
 > Note: the hardware register debugger (`tools/reg_debugger.py` and `tools/reg_debugger_shell.py`) can be used to verify `testbench.test_full`. Continuous run via `resume` is unreliable in this setup and can make `test_full` fail, due to synchronous memory read behavior in the debugger path. The failure is not simply from batching `step` commands; it is tied to the sync read timing, so update debugger usage and tests accordingly.
+
+# Notes for future improvement
+
+- All inferred RAM must be synchronous read, not asynchronous. (quartus will otherwise use distributed RAM to infer async/comb read, bram is sync read only unless small (eg. regfile))
+- The VGA frame buffer must instantiate vga.sv. That's why it was put there.
+- The VGA frame buffer MUST take a clk divider param to divide the clock by based on input clock signal.
+- VGA frame buffer should use the 50 MHz clock provided.
+- In practice, the framebuffer should be written in a BRAM-friendly style: use synchronous reads and writes, and avoid combinational read muxing that prevents clean inference.
+- If a divided clock is needed for display timing, keep the CPU/core side on the normal clock unless there is a clear reason to cross clock domains.
+- If clock-domain crossing becomes necessary, prefer a cleaner architecture over ad hoc hand-rolled CDC: use a single-clock design where possible, or use explicit, well-defined CDC structures (for example, synchronizers or FIFOs) instead of relying on fragile timing assumptions.
+- If Quartus does not infer block RAM reliably from the RTL, the framebuffer should use a dedicated, explicit RAM implementation rather than depending on inference heuristics.
+- A better approach is to move the framebuffer storage into a separate RAM module (for example, a small inferred dual-port or single-port RAM block) and keep the framebuffer logic around it, since this is a cleaner pattern for Quartus inference.
+- As a reference for this style of peripheral design, see src/peripherals/vga_spi.sv for an example of how to structure VGA-related logic around a more self-contained module.
+- The framebuffer peripheral should remain self-contained and not depend on the main system BRAM for its storage unless that is an intentional architectural choice.
