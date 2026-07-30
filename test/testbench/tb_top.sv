@@ -283,8 +283,12 @@ module tb_top #(
     // ──────────────────────────────────────
     //  VGA Framebuffer
     // ──────────────────────────────────────
-    vga_framebuffer u_vga (
-        .clk    (clk),
+    // Mirrors riscv_top.sv: runs off clk50 directly with internal
+    // CLK_DIV=2, not the divided `clk` the core/UART/BRAM use.
+    vga_framebuffer #(
+        .CLK_DIV (2)
+    ) u_vga (
+        .clk    (clk50),
         .rst    (rst),
         .sel    (vga_sel),
         .addr   (dmem_addr[15:0]),

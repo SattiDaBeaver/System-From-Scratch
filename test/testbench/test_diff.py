@@ -20,13 +20,14 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from utils import (
-    reset, load_imem, read_reg, read_dmem, await_pc_convergence, assemble,
+    reset, load_imem, read_reg, read_dmem, read_csr, await_pc_convergence, assemble,
     assemble_source, generate_fuzz_program,
 )
 from cocotb.triggers import RisingEdge
 import random
 
 DMEM_CHECK_WORDS = 16  # touched-region diff window; test programs stay well within this
+CSR_NAMES = ("mstatus", "mie", "mtvec", "mscratch", "mepc", "mcause", "mtval", "mip")
 
 
 def _clear_regfiles(dut):
@@ -52,6 +53,9 @@ def _clear_regfiles(dut):
         dut.imem_ref[i].value = 0
         dut.dmem[i].value = 0
         dut.dmem_ref[i].value = 0
+    for name in CSR_NAMES:
+        getattr(dut.u_core, f"csr_{name}").value = 0
+        getattr(dut.u_core_ref, f"csr_{name}").value = 0
 
 
 @cocotb.test()
@@ -341,6 +345,46 @@ async def diff_test_pipeline_fuzz(dut):
 
 
 @cocotb.test()
+async def diff_test_subword(dut):
+    """Stage-4 sub-word access sanity check: test_diff_subword.asm exercises
+    LB/LH/LBU/LHU/SB/SH through both cores. Unlike test_subword.py (which
+    checks a handful of hand-picked expected values), this diffs the full
+    regfile + dmem window against the golden single-cycle model, so a
+    byte-enable bug that corrupts a neighboring byte would show up as a
+    raw dmem mismatch even if it happened not to trip test_subword.py's
+    specific checks."""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    _clear_regfiles(dut)
+    words = assemble("test_diff_subword.asm")
+    load_imem(dut, words)          # DUT imem
+    for i, word in enumerate(words):
+        dut.imem_ref[i].value = word
+
+    await reset(dut)
+
+    dut_pc = await await_pc_convergence(dut, dut.pc_dbg, period=3)
+    ref_pc = await await_pc_convergence(dut, dut.pc_dbg_ref)
+
+    cocotb.log.info(f"DUT converged at pc=0x{dut_pc:08x}, ref converged at pc=0x{ref_pc:08x}")
+
+    mismatches = []
+    for reg in range(0, 32):
+        dut_val = read_reg(dut, reg, core="u_core")
+        ref_val = read_reg(dut, reg, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    for word in range(DMEM_CHECK_WORDS):
+        dut_val = read_dmem(dut, word, mem="dmem")
+        ref_val = read_dmem(dut, word, mem="dmem_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"dmem[{word}]: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    assert not mismatches, "Differential mismatch:\n" + "\n".join(mismatches)
+
+
+@cocotb.test()
 async def diff_test_pipeline_flush(dut):
     """Milestone 3 sanity check: test_pipeline_flush.asm exercises jal,
     jalr, and both branch directions with no RAW dependencies between any
@@ -370,5 +414,86 @@ async def diff_test_pipeline_flush(dut):
         ref_val = read_reg(dut, reg, core="u_core_ref")
         if dut_val != ref_val:
             mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    assert not mismatches, "Differential mismatch:\n" + "\n".join(mismatches)
+
+@cocotb.test()
+async def diff_test_csr(dut):
+    """Zicsr sanity check: test_diff_csr.asm exercises all 6 CSRR*/CSRR*I
+    variants (CSRRW/S/C register forms and CSRRWI/SI/CI immediate forms)
+    against mscratch/mtvec/mepc/mie with no RAW dependencies between CSR
+    ops (each op's rd is a fresh register), isolating CSR read-modify-
+    write correctness from any hazard-detection concerns. Diffs regfile
+    + dmem as usual, plus all 8 R/W CSRs -- a bug in the new decode/
+    storage logic (e.g. zimm vs sign-extended imm confusion, or the
+    read-old-value/write-new-value ordering) would show up as a regfile
+    or CSR mismatch even if dmem is untouched by this program."""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    _clear_regfiles(dut)
+    words = assemble("test_diff_csr.asm")
+    load_imem(dut, words)          # DUT imem
+    for i, word in enumerate(words):
+        dut.imem_ref[i].value = word
+
+    await reset(dut)
+
+    dut_pc = await await_pc_convergence(dut, dut.pc_dbg, period=3)
+    ref_pc = await await_pc_convergence(dut, dut.pc_dbg_ref)
+
+    cocotb.log.info(f"DUT converged at pc=0x{dut_pc:08x}, ref converged at pc=0x{ref_pc:08x}")
+
+    mismatches = []
+    for reg in range(0, 32):
+        dut_val = read_reg(dut, reg, core="u_core")
+        ref_val = read_reg(dut, reg, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    for name in CSR_NAMES:
+        dut_val = read_csr(dut, name, core="u_core")
+        ref_val = read_csr(dut, name, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"csr_{name}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    assert not mismatches, "Differential mismatch:\n" + "\n".join(mismatches)
+
+
+@cocotb.test()
+async def diff_test_mul(dut):
+    """RV32M sanity check: test_diff_mul.asm exercises all 4 multiply
+    variants (MUL, MULH, MULHSU, MULHU) with no RAW dependencies between
+    ops (each op's rd is a fresh register), isolating multiply-decode/
+    compute correctness from any hazard-detection concerns. Diffs regfile
+    + dmem against the golden single-cycle model -- a bug in the widened
+    dec_bits disambiguation (funct7 aliasing with base R-type ops) or the
+    EX-stage product computation would show up as a regfile mismatch."""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    _clear_regfiles(dut)
+    words = assemble("test_diff_mul.asm")
+    load_imem(dut, words)          # DUT imem
+    for i, word in enumerate(words):
+        dut.imem_ref[i].value = word
+
+    await reset(dut)
+
+    dut_pc = await await_pc_convergence(dut, dut.pc_dbg, period=3)
+    ref_pc = await await_pc_convergence(dut, dut.pc_dbg_ref)
+
+    cocotb.log.info(f"DUT converged at pc=0x{dut_pc:08x}, ref converged at pc=0x{ref_pc:08x}")
+
+    mismatches = []
+    for reg in range(0, 32):
+        dut_val = read_reg(dut, reg, core="u_core")
+        ref_val = read_reg(dut, reg, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    for word in range(DMEM_CHECK_WORDS):
+        dut_val = read_dmem(dut, word, mem="dmem")
+        ref_val = read_dmem(dut, word, mem="dmem_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"dmem[{word}]: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
 
     assert not mismatches, "Differential mismatch:\n" + "\n".join(mismatches)

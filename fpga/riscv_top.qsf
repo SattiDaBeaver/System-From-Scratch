@@ -448,6 +448,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../src/riscv_core/riscv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/riscv_core/riscv_core_single_cycle.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/uart.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/debug_uart.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/dp_ram_sync_read.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/vga_framebuffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE riscv_top.sv
 # riscv_top's CORE_TYPE parameter picks the elaborated core (default

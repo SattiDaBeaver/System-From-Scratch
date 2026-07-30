@@ -24,6 +24,7 @@ module tb_diff #(
     logic [31:0] dmem_addr;
     logic [31:0] dmem_wdata;
     logic        dmem_we;
+    logic [3:0]  dmem_byteena;
     logic        dmem_re;
     logic [31:0] ld_data;
     logic [4:0]  dbg_reg_addr;
@@ -43,6 +44,7 @@ module tb_diff #(
         .dmem_addr   (dmem_addr),
         .dmem_wdata  (dmem_wdata),
         .dmem_we     (dmem_we),
+        .dmem_byteena(dmem_byteena),
         .dmem_re     (dmem_re),
         .ld_data     (ld_data),
         .dmem_req    (),
@@ -56,8 +58,12 @@ module tb_diff #(
     assign ld_data    = dmem[dmem_addr[31:2]];
 
     always_ff @(posedge clk) begin
-        if (dmem_we)
-            dmem[dmem_addr[31:2]] <= dmem_wdata;
+        if (dmem_we) begin
+            if (dmem_byteena[0]) dmem[dmem_addr[31:2]][7:0]   <= dmem_wdata[7:0];
+            if (dmem_byteena[1]) dmem[dmem_addr[31:2]][15:8]  <= dmem_wdata[15:8];
+            if (dmem_byteena[2]) dmem[dmem_addr[31:2]][23:16] <= dmem_wdata[23:16];
+            if (dmem_byteena[3]) dmem[dmem_addr[31:2]][31:24] <= dmem_wdata[31:24];
+        end
     end
 
     // ---- Golden model: frozen pre-pipeline single-cycle core ----
@@ -68,6 +74,7 @@ module tb_diff #(
     logic [31:0] dmem_addr_ref;
     logic [31:0] dmem_wdata_ref;
     logic        dmem_we_ref;
+    logic [3:0]  dmem_byteena_ref;
     logic        dmem_re_ref;
     logic [31:0] ld_data_ref;
     logic [4:0]  dbg_reg_addr_ref;
@@ -87,6 +94,7 @@ module tb_diff #(
         .dmem_addr   (dmem_addr_ref),
         .dmem_wdata  (dmem_wdata_ref),
         .dmem_we     (dmem_we_ref),
+        .dmem_byteena(dmem_byteena_ref),
         .dmem_re     (dmem_re_ref),
         .ld_data     (ld_data_ref),
         .dmem_req    (),
@@ -100,8 +108,12 @@ module tb_diff #(
     assign ld_data_ref    = dmem_ref[dmem_addr_ref[31:2]];
 
     always_ff @(posedge clk) begin
-        if (dmem_we_ref)
-            dmem_ref[dmem_addr_ref[31:2]] <= dmem_wdata_ref;
+        if (dmem_we_ref) begin
+            if (dmem_byteena_ref[0]) dmem_ref[dmem_addr_ref[31:2]][7:0]   <= dmem_wdata_ref[7:0];
+            if (dmem_byteena_ref[1]) dmem_ref[dmem_addr_ref[31:2]][15:8]  <= dmem_wdata_ref[15:8];
+            if (dmem_byteena_ref[2]) dmem_ref[dmem_addr_ref[31:2]][23:16] <= dmem_wdata_ref[23:16];
+            if (dmem_byteena_ref[3]) dmem_ref[dmem_addr_ref[31:2]][31:24] <= dmem_wdata_ref[31:24];
+        end
     end
 
 endmodule

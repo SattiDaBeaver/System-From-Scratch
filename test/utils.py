@@ -71,6 +71,14 @@ def read_dmem(dut, addr_word, mem="dmem"):
     return getattr(dut, mem)[addr_word].value.integer
 
 
+def read_csr(dut, name, core="u_core"):
+    """Read a named CSR register (e.g. "mscratch") from the internal
+    csr_<name> signal. Mirrors read_reg()'s hierarchical-access
+    convention -- `core` selects which core instance (tb_diff.sv:
+    u_core = DUT, u_core_ref = golden single-cycle model)."""
+    return getattr(getattr(dut, core), f"csr_{name}").value.integer
+
+
 # *****************************
 #  Convergence (differential testing)
 # *****************************
@@ -130,7 +138,7 @@ def assemble(filename, search_dir=ASM_DIR):
     # Assemble
     subprocess.run([
         "riscv64-unknown-elf-as",
-        "-march=rv32i", "-mabi=ilp32",
+        "-march=rv32im", "-mabi=ilp32",
         src, "-o", obj
     ], check=True)
 

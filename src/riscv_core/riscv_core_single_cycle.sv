@@ -15,6 +15,7 @@ module riscv_core_single_cycle #(
     output logic [31:0] dmem_addr,
     output logic [31:0] dmem_wdata,
     output logic        dmem_we,
+    output logic [3:0]  dmem_byteena,  // per-byte write mask, valid when dmem_we
     output logic        dmem_re,
     input  logic [31:0] ld_data,
     output logic        dmem_req,   // this cycle's instruction has an outstanding load/store
@@ -25,6 +26,8 @@ module riscv_core_single_cycle #(
     // array port 
     input  logic [4:0]  dbg_reg_addr,
     output logic [31:0] dbg_reg_data,
+    input  logic [11:0] dbg_csr_addr,
+    output logic [31:0] dbg_csr_data,
     output logic [31:0] pc_dbg,
 
     // Junk wire
@@ -69,6 +72,7 @@ module riscv_core_single_cycle #(
     logic is_s_instr;
     logic is_b_instr;
     logic is_j_instr;
+    logic is_csr_instr;
 
     //******** Instruction Fields *********
     logic [4:0] rs1;
@@ -76,6 +80,8 @@ module riscv_core_single_cycle #(
     logic [2:0] funct3;
     logic [4:0] rd;
     logic [6:0] opcode;
+    logic [11:0] csr_addr;
+    logic [31:0] zimm;
 
     logic rs1_valid;
     logic rs2_valid;
@@ -92,8 +98,13 @@ module riscv_core_single_cycle #(
     logic is_slli, is_srli, is_srai;
     logic is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and;
     logic is_load;
+    logic is_lb, is_lh, is_lw, is_lbu, is_lhu;
+    logic is_sb, is_sh, is_sw;
+    logic is_csrrw, is_csrrs, is_csrrc, is_csrrwi, is_csrrsi, is_csrrci;
+    logic is_csr;
+    logic is_mul, is_mulh, is_mulhsu, is_mulhu;
 
-    logic [10:0] dec_bits;
+    logic [11:0] dec_bits;
 
     //******* Arithmetic Logic Unit *******
     logic [31:0] sltu_rslt;
@@ -145,6 +156,7 @@ module riscv_core_single_cycle #(
         is_s_instr = 1'b0;
         is_b_instr = 1'b0;
         is_j_instr = 1'b0;
+        is_csr_instr = 1'b0;
 
         casez (instr[6:2])
             5'b0?101: is_u_instr = 1'b1;
@@ -158,6 +170,7 @@ module riscv_core_single_cycle #(
             5'b0100?: is_s_instr = 1'b1;
             5'b11000: is_b_instr = 1'b1;
             5'b11011: is_j_instr = 1'b1;
+            5'b11100: is_csr_instr = 1'b1;
             default: ;
         endcase
     end
@@ -168,11 +181,14 @@ module riscv_core_single_cycle #(
     assign funct3   = instr[14:12];
     assign rd       = instr[11:7];
     assign opcode   = instr[6:0];
+    assign csr_addr = instr[31:20];
+    assign zimm     = {27'b0, instr[19:15]};
 
-    assign rs1_valid    = is_r_instr || is_s_instr || is_b_instr || is_i_instr;
+    assign rs1_valid    = is_r_instr || is_s_instr || is_b_instr || is_i_instr ||
+                           (is_csr_instr && !(is_csrrwi || is_csrrsi || is_csrrci));
     assign rs2_valid    = is_r_instr || is_s_instr || is_b_instr;
-    assign funct3_valid = is_r_instr || is_s_instr || is_b_instr || is_i_instr;
-    assign rd_valid     = is_r_instr || is_i_instr || is_u_instr || is_j_instr;
+    assign funct3_valid = is_r_instr || is_s_instr || is_b_instr || is_i_instr || is_csr_instr;
+    assign rd_valid     = is_r_instr || is_i_instr || is_u_instr || is_j_instr || is_csr;
     assign imm_valid    = is_i_instr || is_s_instr || is_b_instr || is_u_instr || is_j_instr;
 
     assign imm = 
@@ -184,7 +200,7 @@ module riscv_core_single_cycle #(
         32'b0; 
 
     //*********** Instructions ************
-    assign dec_bits = {instr[30], funct3, opcode};
+    assign dec_bits = {instr[25], instr[30], funct3, opcode};
 
     always_comb begin
         // defaults
@@ -198,47 +214,75 @@ module riscv_core_single_cycle #(
         is_sltu  = 1'b0; is_xor   = 1'b0; is_srl  = 1'b0; is_sra  = 1'b0;
         is_or    = 1'b0; is_and   = 1'b0;
         is_load  = 1'b0;
+        is_lb    = 1'b0; is_lh    = 1'b0; is_lw   = 1'b0; is_lbu  = 1'b0; is_lhu  = 1'b0;
+        is_sb    = 1'b0; is_sh    = 1'b0; is_sw   = 1'b0;
+        is_csrrw = 1'b0; is_csrrs = 1'b0; is_csrrc = 1'b0;
+        is_csrrwi = 1'b0; is_csrrsi = 1'b0; is_csrrci = 1'b0;
+        is_mul   = 1'b0; is_mulh  = 1'b0; is_mulhsu = 1'b0; is_mulhu = 1'b0;
 
         casez (dec_bits)
             // U-type
-            11'b?_???_0110111: is_lui   = 1'b1;
-            11'b?_???_0010111: is_auipc = 1'b1;
+            12'b?_?_???_0110111: is_lui   = 1'b1;
+            12'b?_?_???_0010111: is_auipc = 1'b1;
             // Jumps
-            11'b?_???_1101111: is_jal   = 1'b1;
-            11'b?_???_1100111: is_jalr  = 1'b1;
+            12'b?_?_???_1101111: is_jal   = 1'b1;
+            12'b?_?_???_1100111: is_jalr  = 1'b1;
             // Branches
-            11'b?_000_1100011: is_beq   = 1'b1;
-            11'b?_001_1100011: is_bne   = 1'b1;
-            11'b?_100_1100011: is_blt   = 1'b1;
-            11'b?_101_1100011: is_bge   = 1'b1;
-            11'b?_110_1100011: is_bltu  = 1'b1;
-            11'b?_111_1100011: is_bgeu  = 1'b1;
+            12'b?_?_000_1100011: is_beq   = 1'b1;
+            12'b?_?_001_1100011: is_bne   = 1'b1;
+            12'b?_?_100_1100011: is_blt   = 1'b1;
+            12'b?_?_101_1100011: is_bge   = 1'b1;
+            12'b?_?_110_1100011: is_bltu  = 1'b1;
+            12'b?_?_111_1100011: is_bgeu  = 1'b1;
             // I-type ALU
-            11'b?_000_0010011: is_addi  = 1'b1;
-            11'b?_010_0010011: is_slti  = 1'b1;
-            11'b?_011_0010011: is_sltiu = 1'b1;
-            11'b?_100_0010011: is_xori  = 1'b1;
-            11'b?_110_0010011: is_ori   = 1'b1;
-            11'b?_111_0010011: is_andi  = 1'b1;
-            // Shifts 
-            11'b0_001_0010011: is_slli  = 1'b1;
-            11'b0_101_0010011: is_srli  = 1'b1;
-            11'b1_101_0010011: is_srai  = 1'b1;
-            // R-type
-            11'b0_000_0110011: is_add   = 1'b1;
-            11'b1_000_0110011: is_sub   = 1'b1;
-            11'b0_001_0110011: is_sll   = 1'b1;
-            11'b0_010_0110011: is_slt   = 1'b1;
-            11'b0_011_0110011: is_sltu  = 1'b1;
-            11'b0_100_0110011: is_xor   = 1'b1;
-            11'b0_101_0110011: is_srl   = 1'b1;
-            11'b1_101_0110011: is_sra   = 1'b1;
-            11'b0_110_0110011: is_or    = 1'b1;
-            11'b0_111_0110011: is_and   = 1'b1;
-            // Load
-            11'b?_???_0000011: is_load  = 1'b1;
+            12'b?_?_000_0010011: is_addi  = 1'b1;
+            12'b?_?_010_0010011: is_slti  = 1'b1;
+            12'b?_?_011_0010011: is_sltiu = 1'b1;
+            12'b?_?_100_0010011: is_xori  = 1'b1;
+            12'b?_?_110_0010011: is_ori   = 1'b1;
+            12'b?_?_111_0010011: is_andi  = 1'b1;
+            // Shifts
+            12'b?_0_001_0010011: is_slli  = 1'b1;
+            12'b?_0_101_0010011: is_srli  = 1'b1;
+            12'b?_1_101_0010011: is_srai  = 1'b1;
+            // R-type (base RV32I, funct7[0]=instr[25]=0)
+            12'b0_0_000_0110011: is_add   = 1'b1;
+            12'b0_1_000_0110011: is_sub   = 1'b1;
+            12'b0_0_001_0110011: is_sll   = 1'b1;
+            12'b0_0_010_0110011: is_slt   = 1'b1;
+            12'b0_0_011_0110011: is_sltu  = 1'b1;
+            12'b0_0_100_0110011: is_xor   = 1'b1;
+            12'b0_0_101_0110011: is_srl   = 1'b1;
+            12'b0_1_101_0110011: is_sra   = 1'b1;
+            12'b0_0_110_0110011: is_or    = 1'b1;
+            12'b0_0_111_0110011: is_and   = 1'b1;
+            // R-type (RV32M, funct7=0000001 i.e. instr[25]=1, instr[30]=0)
+            12'b1_0_000_0110011: is_mul     = 1'b1;
+            12'b1_0_001_0110011: is_mulh    = 1'b1;
+            12'b1_0_010_0110011: is_mulhsu  = 1'b1;
+            12'b1_0_011_0110011: is_mulhu   = 1'b1;
+            // Load (opcode 0000011), funct3 selects width/signedness
+            12'b?_?_000_0000011: is_lb    = 1'b1;
+            12'b?_?_001_0000011: is_lh    = 1'b1;
+            12'b?_?_010_0000011: is_lw    = 1'b1;
+            12'b?_?_100_0000011: is_lbu   = 1'b1;
+            12'b?_?_101_0000011: is_lhu   = 1'b1;
+            // Store (opcode 0100011), funct3 selects width
+            12'b?_?_000_0100011: is_sb    = 1'b1;
+            12'b?_?_001_0100011: is_sh    = 1'b1;
+            12'b?_?_010_0100011: is_sw    = 1'b1;
+            // CSR (opcode 1110011), funct3 selects op (000 is PRIV/ECALL/EBREAK, not decoded)
+            12'b?_?_001_1110011: is_csrrw  = 1'b1;
+            12'b?_?_010_1110011: is_csrrs  = 1'b1;
+            12'b?_?_011_1110011: is_csrrc  = 1'b1;
+            12'b?_?_101_1110011: is_csrrwi = 1'b1;
+            12'b?_?_110_1110011: is_csrrsi = 1'b1;
+            12'b?_?_111_1110011: is_csrrci = 1'b1;
             default: ;
         endcase
+
+        is_load = is_lb | is_lh | is_lw | is_lbu | is_lhu;
+        is_csr  = is_csrrw | is_csrrs | is_csrrc | is_csrrwi | is_csrrsi | is_csrrci;
     end
 
     //******* Arithmetic Logic Unit *******
@@ -252,6 +296,15 @@ module riscv_core_single_cycle #(
     // Shift sign-extended results
     assign sra_rslt = sext_src1 >> src2_value[4:0];
     assign srai_rslt = sext_src1 >> imm[4:0];
+
+    // RV32M: 64-bit product, sign/zero-extended per variant before multiply
+    logic signed [63:0] mul_ss_rslt;
+    logic signed [63:0] mul_su_rslt;
+    logic        [63:0] mul_uu_rslt;
+
+    assign mul_ss_rslt = $signed(src1_value) * $signed(src2_value);
+    assign mul_su_rslt = $signed(src1_value) * $signed({1'b0, src2_value});
+    assign mul_uu_rslt = src1_value * src2_value;
 
     // ALU result
     assign result = 
@@ -280,11 +333,81 @@ module riscv_core_single_cycle #(
         is_srai    ? srai_rslt[31:0]                :
         is_load    ? src1_value + imm               :
         is_s_instr ? src1_value + imm               :
+        is_mul     ? mul_ss_rslt[31:0]               :
+        is_mulh    ? mul_ss_rslt[63:32]              :
+        is_mulhsu  ? mul_su_rslt[63:32]              :
+        is_mulhu   ? mul_uu_rslt[63:32]              :
         32'b0;
 
     //********** Register File ************
     // Register file write
-    assign wr_data = is_load ? ld_data : result;
+    logic [1:0]  byte_off;
+    logic [31:0] ld_shifted;
+    logic [7:0]  ld_byte;
+    logic [15:0] ld_half;
+    logic [31:0] ld_extracted;
+
+    assign byte_off   = result[1:0];   // ALU result IS the byte address
+    assign ld_shifted = ld_data >> (byte_off * 8);
+    assign ld_byte    = ld_shifted[7:0];
+    assign ld_half    = ld_shifted[15:0];
+
+    assign ld_extracted =
+        is_lb  ? {{24{ld_byte[7]}},  ld_byte}  :
+        is_lh  ? {{16{ld_half[15]}}, ld_half}  :
+        is_lbu ? {24'b0, ld_byte}              :
+        is_lhu ? {16'b0, ld_half}              :
+        ld_data;  // is_lw
+
+    //************* CSR file **************
+    // Zicsr instructions only -- no trap hardware yet (mstatus/mtvec/mepc/
+    // mcause/mie/mip/mscratch/mtval are plain read/write storage for now,
+    // no side effects). PRIV (funct3=000, ECALL/EBREAK) shares this opcode
+    // but is intentionally left undecoded -- out of scope until trap entry
+    // exists. csr_addr/zimm are computed above alongside the other
+    // instruction fields.
+    logic [31:0] csr_mstatus, csr_mie, csr_mtvec, csr_mscratch;
+    logic [31:0] csr_mepc, csr_mcause, csr_mtval, csr_mip;
+    logic [31:0] csr_rdata;
+    logic [31:0] op_val;
+    logic [31:0] csr_wdata;
+
+    assign csr_rdata =
+        csr_addr == 12'h300 ? csr_mstatus  :
+        csr_addr == 12'h304 ? csr_mie      :
+        csr_addr == 12'h305 ? csr_mtvec    :
+        csr_addr == 12'h340 ? csr_mscratch :
+        csr_addr == 12'h341 ? csr_mepc     :
+        csr_addr == 12'h342 ? csr_mcause   :
+        csr_addr == 12'h343 ? csr_mtval    :
+        csr_addr == 12'h344 ? csr_mip      :
+        32'b0;   // misa, mhartid, everything else: read as 0
+
+    assign op_val = (is_csrrwi | is_csrrsi | is_csrrci) ? zimm : src1_value;
+
+    assign csr_wdata =
+        (is_csrrw | is_csrrwi) ? op_val                :
+        (is_csrrs | is_csrrsi) ? (csr_rdata | op_val)  :
+        (is_csrrc | is_csrrci) ? (csr_rdata & ~op_val) :
+        32'b0;
+
+    always_ff @(posedge clk) begin
+        if (is_csr && !halt && !stall) begin
+            case (csr_addr)
+                12'h300: csr_mstatus  <= csr_wdata;
+                12'h304: csr_mie      <= csr_wdata;
+                12'h305: csr_mtvec    <= csr_wdata;
+                12'h340: csr_mscratch <= csr_wdata;
+                12'h341: csr_mepc     <= csr_wdata;
+                12'h342: csr_mcause   <= csr_wdata;
+                12'h343: csr_mtval    <= csr_wdata;
+                12'h344: csr_mip      <= csr_wdata;
+                default: ;  // misa/mhartid/unimplemented: write ignored
+            endcase
+        end
+    end
+
+    assign wr_data = is_csr ? csr_rdata : (is_load ? ld_extracted : result);
     assign wr_en   = (rd == 5'b0) ? 1'b0 : rd_valid;
 
     // Branch logic
@@ -301,10 +424,15 @@ module riscv_core_single_cycle #(
     assign jalr_tgt_pc = src1_value + imm;
 
     // Data memory interface
-    assign dmem_addr  = result;        // address computed by ALU
-    assign dmem_wdata = src2_value;    // rs2 is always the store data
-    assign dmem_we    = is_s_instr;
-    assign dmem_re    = is_load;
+    assign dmem_addr     = result;        // address computed by ALU
+    assign dmem_wdata    = src2_value << (byte_off * 8);  // shift store data into its byte lane
+    assign dmem_we       = is_s_instr;
+    assign dmem_re       = is_load;
+    assign dmem_byteena  =
+        is_sb ? (4'b0001 << byte_off) :
+        is_sh ? (4'b0011 << byte_off) :
+        is_sw ? 4'b1111               :
+        4'b0000;
 
     // Internal Register File
     logic [31:0] regfile [31:0];
@@ -321,6 +449,16 @@ module riscv_core_single_cycle #(
 
     // Debug interface
     assign dbg_reg_data = (dbg_reg_addr == 5'b0) ? 32'b0 : regfile[dbg_reg_addr];
+    assign dbg_csr_data =
+        dbg_csr_addr == 12'h300 ? csr_mstatus  :
+        dbg_csr_addr == 12'h304 ? csr_mie      :
+        dbg_csr_addr == 12'h305 ? csr_mtvec    :
+        dbg_csr_addr == 12'h340 ? csr_mscratch :
+        dbg_csr_addr == 12'h341 ? csr_mepc     :
+        dbg_csr_addr == 12'h342 ? csr_mcause   :
+        dbg_csr_addr == 12'h343 ? csr_mtval    :
+        dbg_csr_addr == 12'h344 ? csr_mip      :
+        32'b0;
     assign pc_dbg       = pc;
 
 endmodule

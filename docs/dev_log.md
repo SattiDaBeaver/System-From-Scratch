@@ -961,3 +961,78 @@ work.
   hsync/vsync/mono_pixel per pixel clock, dump to an image) the user
   raised as a nice-to-have.
 
+29 Jul 2026
+- Redid `vga_framebuffer.sv`'s storage per README.md's "Notes for future
+  improvement" (items #1-#9, #11; item #10 -- use `vga_spi.sv` as
+  reference -- is the pattern actually followed here). Both 160x120
+  physical buffers are now `dp_ram_sync_read` instances (extracted from
+  `vga_spi.sv` into its own shared file, `src/peripherals/
+  dp_ram_sync_read.sv`) instead of raw `logic [31:0] buffer0/1 [0:599]`
+  arrays read/written directly -- every access is now synchronous-read on
+  both ports, so Quartus reliably infers block RAM instead of falling
+  back to distributed RAM/LEs.
+- The module now clocks directly off the board's full-rate 50MHz clock
+  (`CLOCK_50`/`clk50`) instead of the divided-down 25MHz core clock, with
+  a new `CLK_DIV` parameter (default 2) generating an internal
+  `pixel_en` pulse that gates the H/V timing-counter advance -- mirrors
+  `vga_spi.sv`'s own `vga` submodule's `CLK_DIV`/`vga_en` pattern, and
+  the divide-by-2 logic riscv_top.sv already used at the top level for
+  `clk50`->`clk`. Bus-facing register/buffer read/write logic (VGA_CTRL/
+  STATUS writes, draw/peek reads) is NOT gated by `pixel_en` -- it runs
+  every `clk` (=clk50) edge, unthrottled, same as `vga_spi.sv`'s SPI
+  capture logic.
+- No CDC synchronizers added on the sel/addr/wdata/we/re bus inputs the
+  core drives into this now-clk50-clocked module -- justified because the
+  core's own `clk` is itself a toggle-FF driven directly off `clk50`
+  (mesochronous/phase-aligned, not a genuinely independent asynchronous
+  clock), so clk50-domain logic can sample core-driven signals directly.
+  Explicitly discussed and approved with the user before implementing.
+- `fpga/riscv_top.sv` and `test/testbench/tb_top.sv`: `u_vga`'s `.clk`
+  input changed from `clk` to `clk50`, `#(.CLK_DIV(2))` added (matches
+  the module's own default, so functionally a no-op, but explicit).
+  Everything else about the instantiation (sel/addr/wdata/we/re/rdata/
+  hsync/vsync/mono_pixel) is unchanged.
+- Draw/peek buffer reads are now 2 RTL-internal cycles instead of 1: one
+  for `dp_ram_sync_read`'s own registered `dout_a`, one for an added
+  outer decode-delay register (`sel_d`/`re_d`/`addr_d`/`draw_buf_sel_d`/
+  `peek_buf_sel_d`/`buf_word_addr_valid_d`) that re-aligns the read-mux
+  decode with the RAM's already-1-cycle-old output. VGA_CTRL/VGA_STATUS
+  reads go through the same decode-delay register (for a uniform 2-cycle
+  contract across the whole address space) even though they're plain
+  registers with no RAM latency of their own.
+- Updated `test/testbench/test_vga.py` (the dedicated VGA unit-test suite
+  added in the prior session) for the new timing:
+  - `clear_buffers()`: `dut.u_vga.buffer0/1[i]` -> `dut.u_vga.u_buf0/
+    u_buf1.mem[i]` (buffers now live inside named `dp_ram_sync_read`
+    submodule instances, not raw arrays directly on `vga_framebuffer`).
+  - `read()` helper: needed 3 `RisingEdge`s, not the 2 the RTL's own
+    latency analysis suggested -- root-caused via a temporary debug probe
+    test to a cocotb/Verilator deposit-timing quirk: a `.value` write
+    made immediately after a `RisingEdge` callback (no intervening delta)
+    isn't visible to an `always_ff` register at the very next posedge,
+    only from the edge after that, even though purely-combinational logic
+    driven off the same live signal sees it immediately. `write()` never
+    hit this because it only relies on combinational write-enable decode,
+    never a registered decode of its own inputs.
+  - `test_swap_applies_only_at_frame_start`/`test_hsync_vsync_pulse_widths`:
+    cycle counts scaled by the new `CLK_DIV=2` (h_count/v_count only
+    advance once every `CLK_DIV` clk edges now, not every edge).
+  - `test_hsync_vsync_pulse_widths`'s post-loop hsync-rise check: `pixel_en`
+    is itself a registered divider output, so h_count's first post-reset
+    advance lags by one extra clk edge before settling into the steady
+    `CLK_DIV`-cycle period -- widened the check from a single fixed edge
+    to a small loop (`CLK_DIV` edges) to absorb that fixed startup
+    latency without weakening what it actually verifies (hsync must
+    still rise within a bounded, small window).
+  - All 5 dedicated VGA tests pass (were 4/5 failing immediately after
+    the rewrite, before the above fixes).
+- Full regression after the rewrite: `test_top` 7/7 under both
+  `CORE_TYPE=PIPELINED` and `CORE_TYPE=SINGLE_CYCLE`, `test_full`
+  (tb_core) 27/27, `test_diff` (tb_diff, both cores + fuzz) 7/7, `tb_vga`
+  dedicated suite 5/5 -- zero regressions from the storage/clock rework.
+- Repo-wide grep confirms no leftover `buffer0[`/`buffer1[` raw-array
+  references outside the new `dp_ram_sync_read` module.
+- Not yet done (pending explicit user check-in per standing instruction):
+  removing the now-addressed items from README.md's "Notes for future
+  improvement" list.
+

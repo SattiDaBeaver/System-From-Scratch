@@ -312,8 +312,17 @@ module riscv_top #(
     // ──────────────────────────────────────
     //  VGA Framebuffer
     // ──────────────────────────────────────
-    vga_framebuffer u_vga (
-        .clk    (clk),
+    // Runs off the full-rate 50MHz board clock directly (not the divided
+    // `clk` the core/UART/BRAM use) -- CLK_DIV=2 internally regenerates
+    // the same 25MHz pixel-timing rate this design already relied on, per
+    // README.md's clock-divider note. No CDC synchronizers needed on the
+    // sel/addr/wdata/we/re inputs below: `clk` is itself just a toggle-FF
+    // off `clk50` (see the divider comment above), so it's mesochronous
+    // with clk50, not a genuinely independent/asynchronous clock domain.
+    vga_framebuffer #(
+        .CLK_DIV (2)
+    ) u_vga (
+        .clk    (clk50),
         .rst    (rst),
         .sel    (vga_sel),
         .addr   (dmem_addr[15:0]),
