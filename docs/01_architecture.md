@@ -65,4 +65,15 @@ drop-in for other CPU-driven-VGA projects, not SoC-specific.
 
 ## Interrupt model
 
+Synchronous exceptions only: ECALL/EBREAK trap entry (mepc <- trapping
+pc, mcause <- 11/3, pc <- mtvec) and MRET trap exit (pc <- mepc) are
+implemented on both cores. On the pipelined core they resolve in EX like
+a known-unconditional jump (folded into `ex_flush`/`next_pc`), with a
+stall added ahead of them in ID for any still-in-flight CSR write to the
+same `mtvec`/`mepc` they read.
+
+Not yet implemented: `mstatus` MIE/MPIE bit stacking (no interrupt logic
+or privilege-mode state exists yet to give those bits real meaning), any
+real privilege modes, and timer/external interrupts.
+
 ## Target clock frequency

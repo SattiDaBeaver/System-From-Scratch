@@ -460,6 +460,47 @@ async def diff_test_csr(dut):
 
 
 @cocotb.test()
+async def diff_test_trap(dut):
+    """ECALL/EBREAK/MRET coverage: test_diff_trap.asm round-trips through
+    mtvec_setup, an ecall and an ebreak (each resolved in EX like a known
+    jump -- see riscv_core.sv's ex_flush/next_pc), and a shared mret
+    handler. Diffs regfile + CSR state (mepc/mcause included) against the
+    golden single-cycle model -- this is what actually exercises the
+    pipelined core's 2-stage flush/redirect timing against a reference
+    that has none of that latency, unlike test_trap.py's hand-derived
+    single-cycle-only check."""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    _clear_regfiles(dut)
+    words = assemble("test_diff_trap.asm")
+    load_imem(dut, words)          # DUT imem
+    for i, word in enumerate(words):
+        dut.imem_ref[i].value = word
+
+    await reset(dut)
+
+    dut_pc = await await_pc_convergence(dut, dut.pc_dbg, period=3)
+    ref_pc = await await_pc_convergence(dut, dut.pc_dbg_ref)
+
+    cocotb.log.info(f"DUT converged at pc=0x{dut_pc:08x}, ref converged at pc=0x{ref_pc:08x}")
+
+    mismatches = []
+    for reg in range(0, 32):
+        dut_val = read_reg(dut, reg, core="u_core")
+        ref_val = read_reg(dut, reg, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    for name in CSR_NAMES:
+        dut_val = read_csr(dut, name, core="u_core")
+        ref_val = read_csr(dut, name, core="u_core_ref")
+        if dut_val != ref_val:
+            mismatches.append(f"csr_{name}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
+
+    assert not mismatches, "Differential mismatch:\n" + "\n".join(mismatches)
+
+
+@cocotb.test()
 async def diff_test_mul(dut):
     """RV32M sanity check: test_diff_mul.asm exercises all 4 multiply
     variants (MUL, MULH, MULHSU, MULHU) with no RAW dependencies between

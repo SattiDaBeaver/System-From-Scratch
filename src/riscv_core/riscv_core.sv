@@ -30,6 +30,10 @@ module riscv_core #(
     output logic [31:0] dbg_csr_data,
     output logic [31:0] pc_dbg,
 
+    // Timer interrupt request (level-driven, mirrors mip.MTIP) — see
+    // src/peripherals/timer.sv.
+    input  logic        timer_irq,
+
     // Junk wire
     input  logic        _bogus
 );
@@ -97,6 +101,7 @@ module riscv_core #(
     logic is_csr;
     logic [31:0] op_val;
     logic is_mul, is_mulh, is_mulhsu, is_mulhu;
+    logic is_ecall, is_ebreak, is_mret;
 
     logic [11:0] dec_bits;
 
@@ -116,7 +121,7 @@ module riscv_core #(
     // ID/EX: decode already happened in ID -- carry its *outputs* forward
     // (one-hot control bits packed into id_ctrl_bus, matching this file's
     // existing one-hot-boolean decode style) rather than redecoding in EX.
-    // Bit order (MSB..LSB), 47 bits total:
+    // Bit order (MSB..LSB), 50 bits total:
     //   is_lb, is_lh, is_lw, is_lbu, is_lhu, is_sb, is_sh, is_sw,
     //   is_lui, is_auipc, is_jal, is_jalr,
     //   is_beq, is_bne, is_blt, is_bge, is_bltu, is_bgeu,
@@ -124,10 +129,11 @@ module riscv_core #(
     //   is_slli, is_srli, is_srai,
     //   is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and,
     //   is_mul, is_mulh, is_mulhsu, is_mulhu,
-    //   is_load, is_s_instr, rd_valid, is_csr, csr_optype[1:0]
-    logic [46:0] id_ctrl_bus;
+    //   is_load, is_s_instr, rd_valid, is_csr, csr_optype[1:0],
+    //   is_ecall, is_ebreak, is_mret
+    logic [49:0] id_ctrl_bus;
     logic [4:0]  id_ex_rd;
-    logic [46:0] id_ex_ctrl;
+    logic [49:0] id_ex_ctrl;
     logic [31:0] id_ex_imm;
     logic [31:0] id_ex_src1_value;
     logic [31:0] id_ex_src2_value;
@@ -175,6 +181,7 @@ module riscv_core #(
     logic ex_is_sb, ex_is_sh, ex_is_sw;
     logic ex_is_csr;
     logic [1:0] ex_csr_optype;
+    logic ex_is_ecall, ex_is_ebreak, ex_is_mret;
 
     logic        ex_taken_br;
     logic [31:0] ex_br_tgt_pc;
@@ -202,8 +209,23 @@ module riscv_core #(
     // in id_ex (about to enter EX this same cycle) into invalid bubbles, the
     // same cycle next_pc redirects IF. See docs/03_microarchitecture.md
     // Sec.3.
+    // irq_taken is level-driven (an external timer condition, not tied to
+    // any specific instruction reaching EX) rather than instruction-decoded
+    // like is_ecall/is_ebreak/is_mret above -- checked against whatever
+    // instruction happens to be resolving in EX this cycle as the taken
+    // boundary. Gated on !ex_flush_base so it never fights an
+    // already-resolving branch/jump/trap/mret the same cycle; the interrupt
+    // simply waits one more cycle to be taken instead.
+    logic ex_flush_base;
+    assign ex_flush_base = ex_taken_br || ex_is_jal || ex_is_jalr ||
+                            ex_is_ecall || ex_is_ebreak || ex_is_mret;
+
+    logic irq_taken;
+    assign irq_taken = csr_mstatus[3] && csr_mie[7] && timer_irq &&
+                        !ex_flush_base;
+
     logic ex_flush;
-    assign ex_flush = ex_taken_br || ex_is_jal || ex_is_jalr;
+    assign ex_flush = ex_flush_base || irq_taken;
 
     //*************************************
     //*  RAW-hazard stall (milestone 4)   *
@@ -216,7 +238,23 @@ module riscv_core #(
     // available until mem_wb, exactly like any ALU result, so this same
     // check covers it.
     logic id_stall;
+    logic priv_hazard;
+    logic [11:0] priv_csr_addr;
+    // ECALL/EBREAK/MRET resolve in EX (see ex_flush/next_pc), reading
+    // csr_mtvec/csr_mepc combinationally rather than through the WB-stage
+    // CSR read path -- so a still-in-flight CSRR* write to that same CSR
+    // (in id_ex/ex_mem/mem_wb, not yet committed) must stall ID/EX the
+    // same way a regfile RAW hazard does, or the trap resolves against a
+    // stale mtvec/mepc. irq_taken reads csr_mtvec the same combinational
+    // way, so it needs the identical hazard check.
+    assign priv_csr_addr = is_mret ? 12'h341 : 12'h305;  // mepc : mtvec
+    assign priv_hazard = (is_ecall || is_ebreak || is_mret || irq_taken) && (
+        (id_ex_valid  && ex_is_csr     && id_ex_csr_addr  == priv_csr_addr) ||
+        (ex_mem_valid && ex_mem_is_csr && ex_mem_csr_addr == priv_csr_addr) ||
+        (mem_wb_valid && mem_wb_is_csr && mem_wb_csr_addr == priv_csr_addr)
+    );
     assign id_stall = if_id_valid && !ex_flush && (
+        priv_hazard ||
         (rs1_valid && rs1 != 5'b0 && (
             (id_ex_valid  && ex_wr_en     && id_ex_rd  == rs1) ||
             (ex_mem_valid && ex_mem_wr_en && ex_mem_rd == rs1) ||
@@ -282,8 +320,11 @@ module riscv_core #(
     // same cycle EX resolves otherwise. See docs/03_microarchitecture.md
     // Sec.3.
     assign next_pc =
-        (ex_taken_br || ex_is_jal) ? ex_br_tgt_pc :
-        ex_is_jalr                 ? ex_jalr_tgt_pc :
+        (ex_taken_br || ex_is_jal)   ? ex_br_tgt_pc :
+        ex_is_jalr                   ? ex_jalr_tgt_pc :
+        irq_taken                     ? csr_mtvec :
+        (ex_is_ecall || ex_is_ebreak) ? csr_mtvec :
+        ex_is_mret                    ? csr_mepc :
         pc + 32'd4;
 
     always_ff @(posedge clk) begin : IF_ID_Reg
@@ -453,6 +494,20 @@ module riscv_core #(
         is_csr  = is_csrrw | is_csrrs | is_csrrc | is_csrrwi | is_csrrsi | is_csrrci;
     end
 
+    // PRIV (opcode 1110011, funct3=000): ECALL/EBREAK/MRET all share this
+    // funct3, disambiguated by csr_addr (instr[31:20]) instead of a CSR
+    // address -- kept as its own decode block, separate from the is_csrrw
+    // etc. casez above, since csr_addr means something entirely different
+    // for these three (an opcode-disambiguating immediate, not a real CSR
+    // address). Resolved in EX like is_jal/is_jalr (see ex_flush/next_pc)
+    // rather than committed atomically at WB like CSR ops -- no operand
+    // dependency, fully known at decode.
+    always_comb begin : Priv_Decode
+        is_ecall  = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h000);
+        is_ebreak = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h001);
+        is_mret   = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h302);
+    end
+
     // Register file read -- async, same as before (no forwarding yet: a
     // RAW hazard here silently reads a stale value until milestone 4 adds
     // stall detection. Milestone-2 test programs avoid dependent
@@ -477,7 +532,8 @@ module riscv_core #(
         is_slli, is_srli, is_srai,
         is_add, is_sub, is_sll, is_slt, is_sltu, is_xor, is_srl, is_sra, is_or, is_and,
         is_mul, is_mulh, is_mulhsu, is_mulhu,
-        is_load, is_s_instr, rd_valid, is_csr, csr_optype
+        is_load, is_s_instr, rd_valid, is_csr, csr_optype,
+        is_ecall, is_ebreak, is_mret
     };
 
     logic [11:0] id_ex_csr_addr;
@@ -485,7 +541,7 @@ module riscv_core #(
     always_ff @(posedge clk) begin : ID_EX_Reg
         if (rst) begin
             id_ex_rd         <= 5'b0;
-            id_ex_ctrl        <= 47'b0;
+            id_ex_ctrl        <= 50'b0;
             id_ex_imm         <= 32'b0;
             id_ex_src1_value  <= 32'b0;
             id_ex_src2_value  <= 32'b0;
@@ -510,7 +566,7 @@ module riscv_core #(
             end
             else if (ex_flush) begin
                 id_ex_rd         <= 5'b0;
-                id_ex_ctrl        <= 47'b0;
+                id_ex_ctrl        <= 50'b0;
                 id_ex_imm         <= 32'b0;
                 id_ex_src1_value  <= 32'b0;
                 id_ex_src2_value  <= 32'b0;
@@ -523,7 +579,7 @@ module riscv_core #(
                 // above); EX gets a bubble instead of a second copy of
                 // whatever's already in id_ex.
                 id_ex_rd         <= 5'b0;
-                id_ex_ctrl        <= 47'b0;
+                id_ex_ctrl        <= 50'b0;
                 id_ex_imm         <= 32'b0;
                 id_ex_src1_value  <= 32'b0;
                 id_ex_src2_value  <= 32'b0;
@@ -553,7 +609,8 @@ module riscv_core #(
         ex_is_slli, ex_is_srli, ex_is_srai,
         ex_is_add, ex_is_sub, ex_is_sll, ex_is_slt, ex_is_sltu, ex_is_xor, ex_is_srl, ex_is_sra, ex_is_or, ex_is_and,
         ex_is_mul, ex_is_mulh, ex_is_mulhsu, ex_is_mulhu,
-        ex_is_load, ex_is_s_instr, ex_rd_valid, ex_is_csr, ex_csr_optype
+        ex_is_load, ex_is_s_instr, ex_rd_valid, ex_is_csr, ex_csr_optype,
+        ex_is_ecall, ex_is_ebreak, ex_is_mret
     } = id_ex_ctrl;
 
     // Set less than unsigned
@@ -765,6 +822,13 @@ module riscv_core #(
     logic [31:0] csr_rdata_wb;
     logic [31:0] csr_new_val;
 
+    // mip bit 7 (MTIP) mirrors timer_irq combinationally rather than being
+    // software-writable storage -- it's a live level, not scratch state.
+    // The rest of mip stays plain read/write (no other interrupt sources
+    // exist yet, but there's no reason to special-case those bits too).
+    logic [31:0] csr_mip_read;
+    assign csr_mip_read = {csr_mip[31:8], timer_irq, csr_mip[6:0]};
+
     assign csr_rdata_wb =
         mem_wb_csr_addr == 12'h300 ? csr_mstatus  :
         mem_wb_csr_addr == 12'h304 ? csr_mie      :
@@ -773,7 +837,7 @@ module riscv_core #(
         mem_wb_csr_addr == 12'h341 ? csr_mepc     :
         mem_wb_csr_addr == 12'h342 ? csr_mcause   :
         mem_wb_csr_addr == 12'h343 ? csr_mtval    :
-        mem_wb_csr_addr == 12'h344 ? csr_mip      :
+        mem_wb_csr_addr == 12'h344 ? csr_mip_read :
         32'b0;   // misa, mhartid, everything else: read as 0
 
     assign csr_new_val =
@@ -794,6 +858,35 @@ module riscv_core #(
                 12'h344: csr_mip      <= csr_new_val;
                 default: ;  // misa/mhartid/unimplemented: write ignored
             endcase
+        end
+        // Trap entry (ECALL/EBREAK/timer IRQ) commits mepc/mcause from EX --
+        // resolved like is_jal/is_jalr (see ex_flush/next_pc above), not
+        // atomically at WB like CSR ops, since there's no operand
+        // dependency to wait on. id_ex_pc is the pc of the instruction
+        // currently in EX -- already threaded through the ID/EX register,
+        // no new field needed. mem_wait already defers ex_flush's effect
+        // on pc/if_id/id_ex, so this write naturally waits too (same
+        // ex_is_ecall/ex_is_ebreak/irq_taken signals, held in place until
+        // mem_wait clears).
+        // Ordered after the CSR case above so a trap resolving in EX wins
+        // over a same-cycle CSRR* retiring in WB that happens to target
+        // mepc/mcause. mstatus.MIE/MPIE stack here too: MPIE <= MIE,
+        // MIE <= 0, so a handler can't be re-interrupted until it MRETs.
+        if (!halt && !mem_wait && (ex_is_ecall || ex_is_ebreak || irq_taken)) begin
+            csr_mepc      <= id_ex_pc;
+            csr_mcause    <= irq_taken   ? 32'h8000_0007 :
+                              ex_is_ecall ? 32'd11 :
+                                            32'd3;
+            csr_mstatus[7] <= csr_mstatus[3];  // MPIE <= MIE
+            csr_mstatus[3] <= 1'b0;            // MIE  <= 0
+        end
+        // MRET restores mstatus.MIE from the stacked MPIE, and per the
+        // RISC-V spec sets MPIE back to 1 (the reset/idle default) --
+        // resolved the same EX-stage cycle as the pc<=csr_mepc redirect
+        // in next_pc above.
+        else if (!halt && !mem_wait && ex_is_mret) begin
+            csr_mstatus[3] <= csr_mstatus[7];  // MIE  <= MPIE
+            csr_mstatus[7] <= 1'b1;            // MPIE <= 1
         end
     end
 
@@ -819,7 +912,7 @@ module riscv_core #(
         dbg_csr_addr == 12'h341 ? csr_mepc     :
         dbg_csr_addr == 12'h342 ? csr_mcause   :
         dbg_csr_addr == 12'h343 ? csr_mtval    :
-        dbg_csr_addr == 12'h344 ? csr_mip      :
+        dbg_csr_addr == 12'h344 ? csr_mip_read :
         32'b0;
     assign pc_dbg       = pc;
 

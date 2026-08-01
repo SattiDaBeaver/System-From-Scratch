@@ -45,6 +45,8 @@ module dp_ram (
 	data_b,
 	wren_a,
 	wren_b,
+	byteena_a,
+	byteena_b,
 	q_a,
 	q_b);
 
@@ -55,6 +57,8 @@ module dp_ram (
 	input	[31:0]  data_b;
 	input	  wren_a;
 	input	  wren_b;
+	input	[3:0]   byteena_a;
+	input	[3:0]   byteena_b;
 	output	[31:0]  q_a;
 	output	[31:0]  q_b;
 `ifndef ALTERA_RESERVED_QIS
@@ -80,14 +84,14 @@ module dp_ram (
 				.data_b (data_b),
 				.wren_a (wren_a),
 				.wren_b (wren_b),
+				.byteena_a (byteena_a),
+				.byteena_b (byteena_b),
 				.q_a (sub_wire0),
 				.q_b (sub_wire1),
 				.aclr0 (1'b0),
 				.aclr1 (1'b0),
 				.addressstall_a (1'b0),
 				.addressstall_b (1'b0),
-				.byteena_a (1'b1),
-				.byteena_b (1'b1),
 				.clock1 (1'b1),
 				.clocken0 (1'b1),
 				.clocken1 (1'b1),
@@ -122,8 +126,8 @@ module dp_ram (
 		altsyncram_component.widthad_b = 12,
 		altsyncram_component.width_a = 32,
 		altsyncram_component.width_b = 32,
-		altsyncram_component.width_byteena_a = 1,
-		altsyncram_component.width_byteena_b = 1,
+		altsyncram_component.width_byteena_a = 4,
+		altsyncram_component.width_byteena_b = 4,
 		altsyncram_component.wrcontrol_wraddress_reg_b = "CLOCK0";
 
 

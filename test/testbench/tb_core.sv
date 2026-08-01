@@ -19,6 +19,7 @@ module tb_core #(
     logic [31:0] dmem_wdata;
     logic        dmem_we;
     logic        dmem_re;
+    logic [3:0]  dmem_byteena;
     logic [31:0] ld_data;
     logic [4:0]  dbg_reg_addr;
     logic [31:0] dbg_reg_data;
@@ -39,12 +40,14 @@ module tb_core #(
         .dmem_wdata (dmem_wdata),
         .dmem_we    (dmem_we),
         .dmem_re    (dmem_re),
+        .dmem_byteena(dmem_byteena),
         .ld_data    (ld_data),
         .dmem_req   (),
         .dmem_vld   (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
-        .pc_dbg     (pc_dbg)
+        .pc_dbg     (pc_dbg),
+        .timer_irq  (1'b0)
     );
 
     // Instruction memory - async read
@@ -53,9 +56,16 @@ module tb_core #(
     // Data memory - async read, sync write
     assign ld_data = dmem[dmem_addr[31:2]];
 
+    // Byte-masked write, mirrors dp_ram_model.sv's write_masked -- each set
+    // bit in dmem_byteena overwrites only that byte lane, so SB/SH stores
+    // don't clobber adjacent bytes/halfwords sharing the same word.
     always_ff @(posedge clk) begin
-        if (dmem_we)
-            dmem[dmem_addr[31:2]] <= dmem_wdata;
+        if (dmem_we) begin
+            if (dmem_byteena[0]) dmem[dmem_addr[31:2]][7:0]   <= dmem_wdata[7:0];
+            if (dmem_byteena[1]) dmem[dmem_addr[31:2]][15:8]  <= dmem_wdata[15:8];
+            if (dmem_byteena[2]) dmem[dmem_addr[31:2]][23:16] <= dmem_wdata[23:16];
+            if (dmem_byteena[3]) dmem[dmem_addr[31:2]][31:24] <= dmem_wdata[31:24];
+        end
     end
 
 endmodule

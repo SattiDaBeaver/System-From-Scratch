@@ -144,7 +144,8 @@ module tb_soc (
         .dmem_vld   (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
-        .pc_dbg     (pc_dbg)
+        .pc_dbg     (pc_dbg),
+        .timer_irq  (1'b0)
     );
 
     // Tie off UART RX for now

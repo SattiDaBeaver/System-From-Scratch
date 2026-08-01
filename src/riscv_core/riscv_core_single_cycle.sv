@@ -103,6 +103,7 @@ module riscv_core_single_cycle #(
     logic is_csrrw, is_csrrs, is_csrrc, is_csrrwi, is_csrrsi, is_csrrci;
     logic is_csr;
     logic is_mul, is_mulh, is_mulhsu, is_mulhu;
+    logic is_ecall, is_ebreak, is_mret;
 
     logic [11:0] dec_bits;
 
@@ -139,9 +140,11 @@ module riscv_core_single_cycle #(
             pc <= 32'b0;
         end
         else if (!halt && !stall) begin
-            if (taken_br || is_jal) pc <= br_tgt_pc;
-            else if (is_jalr)       pc <= jalr_tgt_pc;
-            else                    pc <= pc + 32'd4;
+            if (taken_br || is_jal)          pc <= br_tgt_pc;
+            else if (is_jalr)                pc <= jalr_tgt_pc;
+            else if (is_ecall || is_ebreak)  pc <= csr_mtvec;
+            else if (is_mret)                pc <= csr_mepc;
+            else                              pc <= pc + 32'd4;
         end
     end
 
@@ -285,6 +288,18 @@ module riscv_core_single_cycle #(
         is_csr  = is_csrrw | is_csrrs | is_csrrc | is_csrrwi | is_csrrsi | is_csrrci;
     end
 
+    // PRIV (opcode 1110011, funct3=000): ECALL/EBREAK/MRET all share this
+    // funct3, disambiguated by csr_addr (instr[31:20]) instead of a CSR
+    // address -- kept as its own decode block, separate from the is_csrrw
+    // etc. casez above, since csr_addr means something entirely different
+    // for these three (an opcode-disambiguating immediate, not a real CSR
+    // address).
+    always_comb begin : Priv_Decode
+        is_ecall  = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h000);
+        is_ebreak = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h001);
+        is_mret   = (opcode == 7'b1110011) && (funct3 == 3'b000) && (csr_addr == 12'h302);
+    end
+
     //******* Arithmetic Logic Unit *******
     // Set less than unsigned
     assign sltu_rslt = {31'b0, src1_value < src2_value};
@@ -404,6 +419,10 @@ module riscv_core_single_cycle #(
                 12'h344: csr_mip      <= csr_wdata;
                 default: ;  // misa/mhartid/unimplemented: write ignored
             endcase
+        end
+        else if ((is_ecall || is_ebreak) && !halt && !stall) begin
+            csr_mepc   <= pc;
+            csr_mcause <= is_ecall ? 32'd11 : 32'd3;
         end
     end
 

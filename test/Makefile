@@ -10,6 +10,7 @@ VERILOG_SOURCES     += $(PWD)/../src/peripherals/uart.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/debug_uart.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/dp_ram_sync_read.sv
 VERILOG_SOURCES     += $(PWD)/../src/peripherals/vga_framebuffer.sv
+VERILOG_SOURCES     += $(PWD)/../src/peripherals/timer.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_core_sc.sv
 VERILOG_SOURCES     += $(PWD)/testbench/tb_soc.sv

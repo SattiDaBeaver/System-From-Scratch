@@ -70,6 +70,7 @@ module tb_top #(
     logic [31:0] dmem_wdata;
     logic        dmem_we;
     logic        dmem_re;
+    logic [3:0]  dmem_byteena;
     logic [31:0] ld_data;
     logic [4:0]  dbg_reg_addr;
     logic [31:0] dbg_reg_data;
@@ -124,10 +125,12 @@ module tb_top #(
     logic bram_sel;
     logic uart_sel;
     logic vga_sel;
+    logic timer_sel;
 
     assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
     assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
     assign vga_sel  = (dmem_addr[31:16] == 16'h2000);   // 0x20000000 - 0x2000FFFF
+    assign timer_sel = (dmem_addr[31:16] == 16'h3000);  // 0x30000000 - 0x3000FFFF
 
     // ──────────────────────────────────────
     //  Memory-read valid tracking (mirrors fpga/riscv_top.sv -- feeds both
@@ -153,9 +156,21 @@ module tb_top #(
     // stale-valid reporting right after a jump.
     assign imem_rvalid = !imem_addr_changed;
 
+    // Same bug class as imem_rvalid above, but on dmem: dmem_rvalid <= dmem_req
+    // only tracked whether *some* request was pending last cycle, not whether
+    // THIS address had a cycle to register -- see fpga/riscv_top.sv's matching
+    // fix. Back-to-back dmem ops to different addresses (e.g. a store
+    // immediately followed by a load) kept dmem_req high across the address
+    // change, so dmem_rvalid was already asserted on the very first cycle of
+    // the new address, and the core read stale bram_rd_data one cycle early.
+    logic [31:0] dmem_addr_prev;
+    logic        dmem_addr_changed;
+
     always_ff @(posedge clk) begin
-        dmem_rvalid <= dmem_req;  // generalized from dmem_re -- see fpga/riscv_top.sv
+        dmem_addr_prev <= dmem_addr;
     end
+    assign dmem_addr_changed = (dmem_addr != dmem_addr_prev);
+    assign dmem_rvalid = dmem_req && !dmem_addr_changed;
 
     // ──────────────────────────────────────
     //  Load Data Mux
@@ -163,6 +178,8 @@ module tb_top #(
     logic [31:0] bram_rd_data;
     logic [31:0] uart_rd_data;
     logic [31:0] vga_rd_data;
+    logic [31:0] timer_rd_data;
+    logic        timer_irq;
 
     // UART read data mux
     always_comb begin
@@ -178,10 +195,11 @@ module tb_top #(
 
     // Final load data mux
     always_comb begin
-        if      (bram_sel) ld_data = bram_rd_data;
-        else if (uart_sel) ld_data = uart_rd_data;
-        else if (vga_sel)  ld_data = vga_rd_data;
-        else               ld_data = 32'b0;
+        if      (bram_sel)  ld_data = bram_rd_data;
+        else if (uart_sel)  ld_data = uart_rd_data;
+        else if (vga_sel)   ld_data = vga_rd_data;
+        else if (timer_sel) ld_data = timer_rd_data;
+        else                ld_data = 32'b0;
     end
 
     // ──────────────────────────────────────
@@ -235,10 +253,15 @@ module tb_top #(
     logic [31:0] bram_addr_b;
     logic [31:0] bram_data_b;
     logic        bram_we_b;
+    logic [3:0]  bram_byteena_b;
 
     assign bram_addr_b = dbg_mem_valid ? dbg_mem_addr  : dmem_addr;
     assign bram_data_b = dbg_mem_valid ? dbg_mem_wdata : dmem_wdata;
     assign bram_we_b   = dbg_mem_valid ? dbg_mem_we    : (dmem_we && bram_sel);
+    // debug UART's WRITE_MEM is always a full 32-bit word (see
+    // debug_uart.sv's mem_wdata assembly), so it always uses a full mask;
+    // the core's own dmem_byteena only applies to its own dmem writes.
+    assign bram_byteena_b = dbg_mem_valid ? 4'b1111 : dmem_byteena;
     assign dbg_mem_rdata = bram_rd_data;
 
     dp_ram_model #(
@@ -249,11 +272,13 @@ module tb_top #(
         .address_a  (imem_addr[13:2]),
         .data_a     (32'b0),
         .wren_a     (1'b0),
+        .byteena_a  (4'b1111),
         .q_a        (imem_rdata),
         // Port B — data memory / debug-UART hardware bootloader
         .address_b  (bram_addr_b[13:2]),
         .data_b     (bram_data_b),
         .wren_b     (bram_we_b),
+        .byteena_b  (bram_byteena_b),
         .q_b        (bram_rd_data)
     );
 
@@ -302,6 +327,21 @@ module tb_top #(
     );
 
     // ──────────────────────────────────────
+    //  Timer (interrupt source)
+    // ──────────────────────────────────────
+    timer u_timer (
+        .clk    (clk),
+        .rst    (rst),
+        .sel    (timer_sel),
+        .addr   (dmem_addr[3:0]),
+        .wdata  (dmem_wdata),
+        .we     (dmem_we),
+        .re     (dmem_re),
+        .rdata  (timer_rd_data),
+        .irq    (timer_irq)
+    );
+
+    // ──────────────────────────────────────
     //  RISC-V Core
     // ──────────────────────────────────────
     // Both cores share the same req/vld memory-timing contract -- see
@@ -320,6 +360,7 @@ module tb_top #(
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
+                .dmem_byteena(dmem_byteena),
                 .ld_data    (ld_data),
                 .dmem_req   (dmem_req),
                 .dmem_vld   (dmem_rvalid),
@@ -341,12 +382,14 @@ module tb_top #(
                 .dmem_wdata (dmem_wdata),
                 .dmem_we    (dmem_we),
                 .dmem_re    (dmem_re),
+                .dmem_byteena(dmem_byteena),
                 .ld_data    (ld_data),
                 .dmem_req   (dmem_req),
                 .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
                 .pc_dbg     (pc_dbg),
+                .timer_irq  (timer_irq),
                 ._bogus     (1'b0)
             );
         end

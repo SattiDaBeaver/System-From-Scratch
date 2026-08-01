@@ -23,11 +23,26 @@ module dp_ram_model #(
     input  [31:0] data_b,
     input         wren_a,
     input         wren_b,
+    input  [3:0]  byteena_a,  // per-byte write mask; 4'b1111 for full-word writes
+    input  [3:0]  byteena_b,
     output [31:0] q_a,
     output [31:0] q_b
 );
 
     reg [31:0] mem [0:4095];
+
+    // Byte-masked write: each set bit in byteena_* overwrites the
+    // corresponding byte lane of mem[], leaving the others untouched --
+    // matches altsyncram's per-byte-enable write behavior (dp_ram.v),
+    // needed so SB/SH stores don't clobber adjacent bytes/halfwords
+    // sharing the same word (e.g. newlib packing two struct fields into
+    // one word, each written with its own `sh`).
+    task write_masked(input [11:0] addr, input [31:0] data, input [3:0] byteena);
+        if (byteena[0]) mem[addr][7:0]   = data[7:0];
+        if (byteena[1]) mem[addr][15:8]  = data[15:8];
+        if (byteena[2]) mem[addr][23:16] = data[23:16];
+        if (byteena[3]) mem[addr][31:24] = data[31:24];
+    endtask
 
     generate
         if (REGISTERED_ADDR) begin : g_registered
@@ -36,8 +51,8 @@ module dp_ram_model #(
             always @(posedge clock) begin
                 address_a_r <= address_a;
                 address_b_r <= address_b;
-                if (wren_a) mem[address_a] <= data_a;
-                if (wren_b) mem[address_b] <= data_b;
+                if (wren_a) write_masked(address_a, data_a, byteena_a);
+                if (wren_b) write_masked(address_b, data_b, byteena_b);
             end
 
             // OLD_DATA read-during-write, delayed one cycle by the address
@@ -55,8 +70,8 @@ module dp_ram_model #(
             assign q_b = mem[address_b];
 
             always @(posedge clock) begin
-                if (wren_a) mem[address_a] <= data_a;
-                if (wren_b) mem[address_b] <= data_b;
+                if (wren_a) write_masked(address_a, data_a, byteena_a);
+                if (wren_b) write_masked(address_b, data_b, byteena_b);
             end
         end
     endgenerate

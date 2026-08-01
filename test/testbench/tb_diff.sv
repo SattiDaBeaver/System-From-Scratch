@@ -51,7 +51,8 @@ module tb_diff #(
         .dmem_vld    (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
-        .pc_dbg      (pc_dbg)
+        .pc_dbg      (pc_dbg),
+        .timer_irq   (1'b0)
     );
 
     assign imem_rdata = imem[imem_addr[31:2]];
