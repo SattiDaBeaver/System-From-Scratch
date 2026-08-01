@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RISC-V Web Debugger</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body id="app-body">
+  <header>
+    <h1>RISC-V Hardware Debugger</h1>
+    <span id="conn-status" class="status disconnected">disconnected</span>
+    <button id="btn-theme" class="theme-toggle" title="toggle light/dark">&#9788;</button>
+  </header>
+
+  <section id="connection">
+    <h2>Connection</h2>
+    <div class="conn-controls">
+      <select id="port-select"><option value="">-- select detected port --</option></select>
+      <button id="btn-scan-ports">Scan ports</button>
+      <label>manual port <input id="port-manual" type="text" placeholder="COM3 (Windows) or /dev/ttyUSB1 (Linux)"></label>
+      <label>baud <input id="conn-baud" type="number" min="1" value="115200"></label>
+      <label><input id="dry-run-toggle" type="checkbox"> dry-run (no hardware)</label>
+      <button id="btn-connect">Connect</button>
+      <button id="btn-disconnect">Disconnect</button>
+      <span id="port-status"></span>
+    </div>
+  </section>
+
+  <section id="controls">
+    <button id="btn-halt">Halt</button>
+    <button id="btn-resume">Resume</button>
+    <button id="btn-step">Step</button>
+    <input id="step-count" type="number" min="1" value="1" title="cycles per step">
+    <span id="run-state" class="status unknown">unknown</span>
+    <span id="pc-display" class="pc">pc: --</span>
+  </section>
+
+  <section id="dashboard-box">
+    <div id="main-columns">
+      <div id="col-registers">
+        <section id="regs">
+          <h2>Registers</h2>
+          <table id="reg-table">
+            <colgroup>
+              <col class="col-reg-name">
+              <col class="col-reg-abi">
+              <col class="col-reg-hex">
+              <col class="col-reg-uint">
+              <col class="col-reg-int">
+              <col class="col-reg-ascii">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="reg-name">Register</th>
+                <th class="reg-abi">ABI Name</th>
+                <th class="reg-hex">Hexadecimal</th>
+                <th class="reg-uint">Unsigned</th>
+                <th class="reg-int">Signed</th>
+                <th class="reg-ascii">ASCII</th>
+              </tr>
+            </thead>
+            <tbody id="reg-table-body"></tbody>
+          </table>
+        </section>
+      </div>
+
+      <div id="col-ide">
+        <section id="ide">
+          <h2>Assembly IDE <span class="hint">(RV32IM, debug-UART upload -- link_dbg.ld, no bootloader)</span></h2>
+          <div class="editor-wrap">
+            <pre id="asm-highlight" aria-hidden="true"><code></code></pre>
+            <textarea id="asm-source" spellcheck="false" wrap="off">.text
+    li      a0, 0x10000000      # UART_TX
+    li      a1, 0x48             # 'H'
+    sw      a1, 0(a0)
+loop:
+    j       loop
+</textarea>
+          </div>
+          <div class="ide-controls">
+            <button id="btn-assemble">Assemble</button>
+            <button id="btn-assemble-flash">Assemble + Flash</button>
+            <label><input id="ide-resume" type="checkbox" checked> resume after flash</label>
+          </div>
+          <h2>Disassembly</h2>
+          <pre id="asm-disasm"></pre>
+        </section>
+      </div>
+
+      <div id="col-right">
+        <section id="memory">
+          <h2>Memory</h2>
+          <div class="mem-controls">
+            <label>addr <input id="mem-addr" type="text" value="0x00000000"></label>
+            <label>words <input id="mem-count" type="number" min="1" value="8"></label>
+            <button id="btn-read-mem">Read</button>
+          </div>
+          <pre id="mem-dump"></pre>
+          <div class="mem-controls">
+            <label>addr <input id="wmem-addr" type="text" value="0x00000000"></label>
+            <label>data <input id="wmem-data" type="text" value="0x00000000"></label>
+            <button id="btn-write-mem">Write</button>
+          </div>
+        </section>
+
+        <section id="csrs">
+          <h2>CSRs</h2>
+          <button id="btn-read-csrs">Read CSRs</button>
+          <table id="csr-table">
+            <colgroup>
+              <col class="col-csr-name">
+              <col class="col-csr-hex">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="csr-name">CSR</th>
+                <th class="csr-hex">Hexadecimal</th>
+              </tr>
+            </thead>
+            <tbody id="csr-table-body"></tbody>
+          </table>
+        </section>
+
+        <section id="mmio">
+          <h2>MMIO <span class="hint">(peek only, halted; UART RX/STATUS reads can perturb pending data)</span></h2>
+          <button id="btn-read-mmio">Read MMIO</button>
+          <table id="mmio-table">
+            <colgroup>
+              <col class="col-mmio-name">
+              <col class="col-mmio-hex">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="mmio-name">Register</th>
+                <th class="mmio-hex">Hexadecimal</th>
+              </tr>
+            </thead>
+            <tbody id="mmio-table-body"></tbody>
+          </table>
+        </section>
+
+        <section id="vga-ref">
+          <h2>VGA <span class="hint">(reference only -- not reachable via debug UART, see app.js comment)</span></h2>
+          <table id="vga-ref-table">
+            <thead>
+              <tr>
+                <th class="mmio-name">Name</th>
+                <th class="mmio-hex">Address</th>
+                <th class="vga-ref-note">Notes</th>
+              </tr>
+            </thead>
+            <tbody id="vga-ref-table-body"></tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+
+    <div id="flash-row">
+      <section id="flash">
+        <h2>Flash Program</h2>
+        <div class="flash-controls">
+          <input id="flash-file" type="file" accept=".bin,.mif">
+          <label>base addr <input id="flash-base" type="text" value="0x00000000"></label>
+          <label><input id="flash-resume" type="checkbox" checked> resume after load</label>
+          <button id="btn-flash">Flash</button>
+        </div>
+        <span id="flash-status"></span>
+      </section>
+    </div>
+  </section>
+
+  <section id="log">
+    <h2>Log <button id="btn-clear-log">clear</button></h2>
+    <pre id="log-output"></pre>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

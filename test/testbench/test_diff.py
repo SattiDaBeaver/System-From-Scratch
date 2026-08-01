@@ -491,7 +491,15 @@ async def diff_test_trap(dut):
         if dut_val != ref_val:
             mismatches.append(f"x{reg}: dut=0x{dut_val:08x} ref=0x{ref_val:08x}")
 
+    # mstatus is excluded here: the pipelined core stacks MIE/MPIE on trap
+    # entry/exit (docs/01_architecture.md "Interrupt model"), but that was
+    # deliberately not ported to the frozen single-cycle golden model --
+    # parity there is a separate, not-yet-scheduled task. Comparing mstatus
+    # would make this test permanently fail on an intentional divergence,
+    # not a real bug.
     for name in CSR_NAMES:
+        if name == "mstatus":
+            continue
         dut_val = read_csr(dut, name, core="u_core")
         ref_val = read_csr(dut, name, core="u_core_ref")
         if dut_val != ref_val:

@@ -77,6 +77,10 @@ module tb_top #(
     logic [31:0] pc_dbg;
     logic        halt;
 
+    // Debug-driven CSR read (async, combinational on the core side).
+    logic [11:0] dbg_csr_addr;
+    logic [31:0] dbg_csr_data;
+
     // req/vld memory handshake -- mirrors fpga/riscv_top.sv
     logic        imem_req;
     logic        dmem_req;
@@ -88,6 +92,12 @@ module tb_top #(
     logic        dbg_mem_we;
     logic        dbg_mem_valid;
     logic [31:0] dbg_mem_rdata;
+
+    // Debug-driven MMIO peripheral read (READ_MMIO) -- see the periph_addr
+    // mux below.
+    logic [31:0] dbg_mmio_addr;
+    logic        dbg_mmio_valid;
+    logic [31:0] dbg_mmio_rdata;
 
     // ──────────────────────────────────────
     //  UART Wires
@@ -127,10 +137,17 @@ module tb_top #(
     logic vga_sel;
     logic timer_sel;
 
-    assign bram_sel = (dmem_addr[31:16] == 16'h0000);  // 0x00000000 - 0x00003FFF
-    assign uart_sel = (dmem_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
-    assign vga_sel  = (dmem_addr[31:16] == 16'h2000);   // 0x20000000 - 0x2000FFFF
-    assign timer_sel = (dmem_addr[31:16] == 16'h3000);  // 0x30000000 - 0x3000FFFF
+    // Debug READ_MMIO steers uart_sel/timer_sel's decode off dbg_mmio_addr
+    // instead of dmem_addr while dbg_mmio_valid is high -- mirrors
+    // fpga/riscv_top.sv. VGA is intentionally excluded, so vga_sel stays
+    // on dmem_addr unconditionally.
+    logic [31:0] periph_addr;
+    assign periph_addr = dbg_mmio_valid ? dbg_mmio_addr : dmem_addr;
+
+    assign bram_sel  = (dmem_addr[31:16]   == 16'h0000);    // 0x00000000 - 0x00003FFF
+    assign uart_sel  = (periph_addr[31:4]  == 28'h1000000); // 0x10000000 - 0x1000000F
+    assign vga_sel   = (dmem_addr[31:16]   == 16'h2000);    // 0x20000000 - 0x2000FFFF
+    assign timer_sel = (periph_addr[31:16] == 16'h3000);    // 0x30000000 - 0x3000FFFF
 
     // ──────────────────────────────────────
     //  Memory-read valid tracking (mirrors fpga/riscv_top.sv -- feeds both
@@ -181,10 +198,11 @@ module tb_top #(
     logic [31:0] timer_rd_data;
     logic        timer_irq;
 
-    // UART read data mux
+    // UART read data mux -- indexed off periph_addr so a debug READ_MMIO
+    // reads the same registers the core itself would see at that address.
     always_comb begin
         uart_rd_data = 32'b0;
-        casez (dmem_addr[3:2])
+        casez (periph_addr[3:2])
             2'b00: uart_rd_data = {24'b0, uart_tx_data};           // TX data
             2'b01: uart_rd_data = {24'b0, uart_rx_data};           // RX data
             2'b10: uart_rd_data = {30'b0, uart_rx_done,
@@ -200,6 +218,13 @@ module tb_top #(
         else if (vga_sel)   ld_data = vga_rd_data;
         else if (timer_sel) ld_data = timer_rd_data;
         else                ld_data = 32'b0;
+    end
+
+    // dbg_mmio_rdata mirrors fpga/riscv_top.sv's equivalent mux.
+    always_comb begin
+        if      (uart_sel)  dbg_mmio_rdata = uart_rd_data;
+        else if (timer_sel) dbg_mmio_rdata = timer_rd_data;
+        else                dbg_mmio_rdata = 32'b0;
     end
 
     // ──────────────────────────────────────
@@ -333,10 +358,11 @@ module tb_top #(
         .clk    (clk),
         .rst    (rst),
         .sel    (timer_sel),
-        .addr   (dmem_addr[3:0]),
+        .addr   (periph_addr[3:0]),
         .wdata  (dmem_wdata),
         .we     (dmem_we),
-        .re     (dmem_re),
+        // OR in dbg_mmio_valid -- see fpga/riscv_top.sv's matching comment.
+        .re     (dmem_re || dbg_mmio_valid),
         .rdata  (timer_rd_data),
         .irq    (timer_irq)
     );
@@ -366,6 +392,8 @@ module tb_top #(
                 .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
+                .dbg_csr_addr(dbg_csr_addr),
+                .dbg_csr_data(dbg_csr_data),
                 .pc_dbg     (pc_dbg),
                 ._bogus     (1'b0)
             );
@@ -388,6 +416,8 @@ module tb_top #(
                 .dmem_vld   (dmem_rvalid),
                 .dbg_reg_addr(dbg_reg_addr),
                 .dbg_reg_data(dbg_reg_data),
+                .dbg_csr_addr(dbg_csr_addr),
+                .dbg_csr_data(dbg_csr_data),
                 .pc_dbg     (pc_dbg),
                 .timer_irq  (timer_irq),
                 ._bogus     (1'b0)
@@ -409,11 +439,16 @@ module tb_top #(
         .dbg_reg_addr (dbg_reg_addr),
         .dbg_reg_data (dbg_reg_data),
         .pc_dbg       (pc_dbg),
+        .dbg_csr_addr (dbg_csr_addr),
+        .dbg_csr_data (dbg_csr_data),
         .dbg_mem_addr  (dbg_mem_addr),
         .dbg_mem_wdata (dbg_mem_wdata),
         .dbg_mem_we    (dbg_mem_we),
         .dbg_mem_valid (dbg_mem_valid),
         .dbg_mem_rdata (dbg_mem_rdata),
+        .dbg_mmio_addr  (dbg_mmio_addr),
+        .dbg_mmio_valid (dbg_mmio_valid),
+        .dbg_mmio_rdata (dbg_mmio_rdata),
         .halt         (halt)
     );
 

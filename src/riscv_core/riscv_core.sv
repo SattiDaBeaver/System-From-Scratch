@@ -213,16 +213,20 @@ module riscv_core #(
     // any specific instruction reaching EX) rather than instruction-decoded
     // like is_ecall/is_ebreak/is_mret above -- checked against whatever
     // instruction happens to be resolving in EX this cycle as the taken
-    // boundary. Gated on !ex_flush_base so it never fights an
-    // already-resolving branch/jump/trap/mret the same cycle; the interrupt
-    // simply waits one more cycle to be taken instead.
+    // boundary. Only gated on !(ecall/ebreak/mret) -- those are themselves
+    // synchronous trap entry/exit and must not be preempted or double-
+    // handled the same cycle. An ordinary taken branch/jal/jalr must NOT
+    // block it: a tight self-loop (`jal x0, loop`) resolves as a taken jal
+    // every single cycle, so gating on the wider ex_flush_base would make
+    // irq_taken permanently unreachable while spinning -- exactly the
+    // pattern this core is designed to be interrupted out of.
     logic ex_flush_base;
     assign ex_flush_base = ex_taken_br || ex_is_jal || ex_is_jalr ||
                             ex_is_ecall || ex_is_ebreak || ex_is_mret;
 
     logic irq_taken;
     assign irq_taken = csr_mstatus[3] && csr_mie[7] && timer_irq &&
-                        !ex_flush_base;
+                        !(ex_is_ecall || ex_is_ebreak || ex_is_mret);
 
     logic ex_flush;
     assign ex_flush = ex_flush_base || irq_taken;
@@ -320,9 +324,9 @@ module riscv_core #(
     // same cycle EX resolves otherwise. See docs/03_microarchitecture.md
     // Sec.3.
     assign next_pc =
+        irq_taken                     ? csr_mtvec :
         (ex_taken_br || ex_is_jal)   ? ex_br_tgt_pc :
         ex_is_jalr                   ? ex_jalr_tgt_pc :
-        irq_taken                     ? csr_mtvec :
         (ex_is_ecall || ex_is_ebreak) ? csr_mtvec :
         ex_is_mret                    ? csr_mepc :
         pc + 32'd4;

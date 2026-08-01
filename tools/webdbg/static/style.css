@@ -1,0 +1,332 @@
+:root {
+  --bg: #1e1e1e;
+  --fg: #ddd;
+  --panel-bg: #2a2a2a;
+  --panel-bg-2: #141414;
+  --border: #3a3a3a;
+  --border-strong: #555;
+  --accent: #9cd;
+  --accent-2: #7ab;
+  --changed-bg: #464a1e;
+  --changed-border: #8a8;
+  --muted: #aaa;
+  --pc: #dc9;
+  --status-ok: #274;
+  --status-bad: #722;
+  --status-halt: #742;
+  --status-unknown: #444;
+}
+
+body.light-theme {
+  --bg: #f4f4f2;
+  --fg: #1c1c1c;
+  --panel-bg: #ffffff;
+  --panel-bg-2: #eceae4;
+  --border: #d6d3cc;
+  --border-strong: #b8b4ac;
+  --accent: #2b6a8a;
+  --accent-2: #3a7a5e;
+  --changed-bg: #f2edb3;
+  --changed-border: #b8ae3a;
+  --muted: #6b6b6b;
+  --pc: #8a5a10;
+  --status-ok: #6fbf83;
+  --status-bad: #e07a7a;
+  --status-halt: #e0a35a;
+  --status-unknown: #b0b0b0;
+}
+
+body {
+  font-family: monospace;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  padding: 1rem;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+h1 { font-size: 1.2rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0.5rem 0; color: var(--accent); }
+
+.theme-toggle {
+  margin-left: auto;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.3rem 0.6rem;
+}
+
+.status {
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.status.connected { background: var(--status-ok); }
+.status.disconnected { background: var(--status-bad); }
+.status.halted { background: var(--status-halt); }
+.status.running { background: var(--status-ok); }
+.status.unknown { background: var(--status-unknown); }
+
+#controls, .conn-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+button {
+  background: var(--panel-bg);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+button:hover { background: var(--panel-bg-2); }
+
+input[type="text"], input[type="number"], select {
+  background: var(--panel-bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  padding: 0.3rem;
+  border-radius: 4px;
+  width: 6rem;
+}
+select { width: auto; }
+
+.pc { margin-left: 1rem; color: var(--pc); }
+
+#port-status { font-size: 0.85rem; color: var(--muted); }
+
+#reg-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+.col-reg-name  { width: 3rem; }
+.col-reg-abi   { width: 4rem; }
+.col-reg-hex   { width: 9rem; }
+.col-reg-uint  { width: 9rem; }
+.col-reg-int   { width: 9rem; }
+.col-reg-ascii { width: 4rem; }
+#reg-table th {
+  color: var(--muted);
+  font-weight: normal;
+  border-bottom: 1px solid var(--border-strong);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+#reg-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.2rem 0.6rem;
+  transition: background 0.1s ease;
+  white-space: nowrap;
+}
+#reg-table th.reg-name, #reg-table td.reg-name,
+#reg-table th.reg-abi, #reg-table td.reg-abi { text-align: left; }
+#reg-table td.reg-name, #reg-table td.reg-abi { color: var(--accent-2); }
+#reg-table th.reg-hex, #reg-table th.reg-uint, #reg-table th.reg-int,
+#reg-table td.reg-hex, #reg-table td.reg-uint, #reg-table td.reg-int { text-align: right; }
+#reg-table th.reg-ascii, #reg-table td.reg-ascii { text-align: left; }
+#reg-table td.reg-ascii { color: var(--muted); letter-spacing: 0.1rem; }
+
+#reg-table tr.changed td { background: var(--changed-bg); }
+
+#csr-table, #mmio-table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 24rem;
+  font-size: 0.85rem;
+  margin-top: 0.4rem;
+}
+#csr-table th, #mmio-table th {
+  color: var(--muted);
+  font-weight: normal;
+  border-bottom: 1px solid var(--border-strong);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+#csr-table td, #mmio-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+#csr-table th.csr-name, #csr-table td.csr-name,
+#mmio-table th.mmio-name, #mmio-table td.mmio-name { text-align: left; }
+#csr-table td.csr-name, #mmio-table td.mmio-name { color: var(--accent-2); }
+#csr-table th.csr-hex, #mmio-table th.mmio-hex,
+#csr-table td.csr-hex, #mmio-table td.mmio-hex { text-align: right; }
+
+#vga-ref-table { border-collapse: collapse; width: 100%; max-width: 24rem; font-size: 0.85rem; margin-top: 0.4rem; }
+#vga-ref-table th { color: var(--muted); font-weight: normal; border-bottom: 1px solid var(--border-strong); padding: 0.2rem 0.6rem; white-space: nowrap; }
+#vga-ref-table td { border-bottom: 1px solid var(--border); padding: 0.2rem 0.6rem; }
+#vga-ref-table td.mmio-name { color: var(--accent-2); white-space: nowrap; }
+#vga-ref-table td.mmio-hex, #vga-ref-table th.mmio-hex { text-align: right; white-space: nowrap; }
+#vga-ref-table td.vga-ref-note, #vga-ref-table th.vga-ref-note { color: var(--muted); font-size: 0.78rem; }
+
+#mmio h2 .hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+#log h2 button {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  margin-left: 0.5rem;
+}
+
+.mem-controls, .flash-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+#mem-dump, #log-output {
+  background: var(--panel-bg-2);
+  padding: 0.6rem;
+  border-radius: 4px;
+  max-height: 12rem;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+section { margin-bottom: 1.2rem; }
+
+#dashboard-box {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 1rem;
+  background: var(--panel-bg);
+  margin-bottom: 1.2rem;
+}
+#dashboard-box #memory, #dashboard-box #csrs, #dashboard-box #mmio, #dashboard-box #flash, #dashboard-box #ide {
+  margin-bottom: 0;
+}
+
+#main-columns {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+#col-registers {
+  flex: 0 0 34rem;
+}
+#col-ide {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#col-right {
+  flex: 0 0 24rem;
+}
+#col-right section {
+  margin-bottom: 1.2rem;
+}
+#col-right section:last-child {
+  margin-bottom: 0;
+}
+
+#flash-row {
+  margin-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+#ide h2 .hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+.ide-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0;
+  flex-wrap: wrap;
+}
+
+#asm-disasm {
+  background: var(--panel-bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  padding: 0.6rem;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  width: 100%;
+  box-sizing: border-box;
+  max-height: 16rem;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.editor-wrap {
+  position: relative;
+  width: 100%;
+  height: 12rem;
+}
+
+/* #asm-highlight sits behind #asm-source and renders the colored tokens;
+   #asm-source's own text is transparent (only the caret shows) so typing
+   feels native while the coloring comes from the layer underneath --
+   both share identical font metrics/padding/border so characters line up
+   exactly, and JS keeps their scroll position in sync (see app.js). */
+#asm-highlight, #asm-source {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  box-sizing: border-box;
+  white-space: pre;
+  overflow: auto;
+}
+
+#asm-highlight {
+  background: var(--panel-bg-2);
+  color: var(--fg);
+  pointer-events: none;
+  z-index: 1;
+}
+#asm-highlight code { font: inherit; }
+
+#asm-source {
+  background: transparent;
+  color: transparent;
+  caret-color: var(--fg);
+  resize: vertical;
+  z-index: 2;
+}
+
+.tok-comment { color: var(--muted); }
+.tok-directive { color: var(--accent-2); }
+.tok-label { color: var(--pc); }
+.tok-mnemonic { color: var(--accent); font-weight: bold; }
+.tok-register { color: var(--changed-border); }
+.tok-number { color: #c9a0dc; }
+body.light-theme .tok-number { color: #8a4fbe; }
+.tok-string { color: #d69; }
+
+#mem-dump {
+  width: 100%;
+  box-sizing: border-box;
+}

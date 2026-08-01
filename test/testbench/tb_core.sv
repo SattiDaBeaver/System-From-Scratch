@@ -25,6 +25,12 @@ module tb_core #(
     logic [31:0] dbg_reg_data;
     logic [31:0] pc_dbg;
 
+    // Debug CSR read -- no debug_uart instance in this testbench, so just
+    // expose these for direct signal access (dut.u_core.dbg_csr_data)
+    // rather than driving them from anywhere.
+    logic [11:0] dbg_csr_addr;
+    logic [31:0] dbg_csr_data;
+
     // Instantiate core
     riscv_core #(
         .ISA("RV32I")
@@ -46,6 +52,8 @@ module tb_core #(
         .dmem_vld   (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
+        .dbg_csr_addr(dbg_csr_addr),
+        .dbg_csr_data(dbg_csr_data),
         .pc_dbg     (pc_dbg),
         .timer_irq  (1'b0)
     );

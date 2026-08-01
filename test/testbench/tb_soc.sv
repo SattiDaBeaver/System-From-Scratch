@@ -23,6 +23,17 @@ module tb_soc (
     logic [31:0] pc_dbg;
     logic        halt;
 
+    // Debug CSR read -- mirrors fpga/riscv_top.sv's wiring.
+    logic [11:0] dbg_csr_addr;
+    logic [31:0] dbg_csr_data;
+
+    // Debug READ_MMIO -- mirrors fpga/riscv_top.sv's periph_addr mux, but
+    // only covers uart_sel since tb_soc has no timer instance.
+    logic [31:0] dbg_mmio_addr;
+    logic        dbg_mmio_valid;
+    logic [31:0] dbg_mmio_rdata;
+
+
     // Debug-UART-driven dmem access (hardware bootloader) -- see the
     // dmem port B mux below.
     logic [31:0] dbg_mem_addr;
@@ -43,8 +54,13 @@ module tb_soc (
     logic bram_sel;
     logic uart_sel;
 
-    assign bram_sel = (dmem_addr[31:16] == 16'h0000);
-    assign uart_sel = (dmem_addr[31:4]  == 28'h1000000);
+    // dbg_mmio_valid steers uart_sel's decode off dbg_mmio_addr instead of
+    // dmem_addr, mirroring fpga/riscv_top.sv's periph_addr mux.
+    logic [31:0] periph_addr;
+    assign periph_addr = dbg_mmio_valid ? dbg_mmio_addr : dmem_addr;
+
+    assign bram_sel = (dmem_addr[31:16]  == 16'h0000);
+    assign uart_sel = (periph_addr[31:4] == 28'h1000000);
 
     // Load data mux
     logic [31:0] bram_rd_data;
@@ -52,7 +68,7 @@ module tb_soc (
 
     always_comb begin
         uart_rd_data = 32'b0;
-        casez (dmem_addr[3:2])
+        casez (periph_addr[3:2])
             2'b00: uart_rd_data = {24'b0, uart_tx_data};
             2'b01: uart_rd_data = {24'b0, uart_rx_data};
             2'b10: uart_rd_data = {30'b0, uart_rx_done, uart_tx_busy};
@@ -65,6 +81,14 @@ module tb_soc (
         else if (uart_sel) ld_data = uart_rd_data;
         else               ld_data = 32'b0;
     end
+
+    // dbg_mmio_rdata mirrors fpga/riscv_top.sv's equivalent mux, minus the
+    // timer branch (no timer instance in tb_soc).
+    always_comb begin
+        if (uart_sel) dbg_mmio_rdata = uart_rd_data;
+        else          dbg_mmio_rdata = 32'b0;
+    end
+
 
     // UART write decode
     always_comb begin
@@ -144,6 +168,8 @@ module tb_soc (
         .dmem_vld   (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
+        .dbg_csr_addr(dbg_csr_addr),
+        .dbg_csr_data(dbg_csr_data),
         .pc_dbg     (pc_dbg),
         .timer_irq  (1'b0)
     );
@@ -163,11 +189,16 @@ module tb_soc (
         .dbg_reg_addr (dbg_reg_addr),
         .dbg_reg_data (dbg_reg_data),
         .pc_dbg       (pc_dbg),
+        .dbg_csr_addr (dbg_csr_addr),
+        .dbg_csr_data (dbg_csr_data),
         .dbg_mem_addr  (dbg_mem_addr),
         .dbg_mem_wdata (dbg_mem_wdata),
         .dbg_mem_we    (dbg_mem_we),
         .dbg_mem_valid (dbg_mem_valid),
         .dbg_mem_rdata (dbg_mem_rdata),
+        .dbg_mmio_addr  (dbg_mmio_addr),
+        .dbg_mmio_valid (dbg_mmio_valid),
+        .dbg_mmio_rdata (dbg_mmio_rdata),
         .halt         (halt)
     );
 

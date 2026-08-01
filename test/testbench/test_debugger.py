@@ -23,6 +23,12 @@ CMD_STEP     = 0x03
 CMD_READ_REG = 0x04
 CMD_READ_PC  = 0x05
 CMD_READ_ALL = 0x06
+CMD_READ_CSR  = 0x09
+CMD_READ_MMIO = 0x0A
+
+CSR_MSTATUS = 0x300
+UART_TX_ADDR     = 0x10000000
+UART_STATUS_ADDR = 0x10000008
 
 
 async def dbg_send_byte(dut, byte, clk_per_bit=CLK_PER_BIT):
@@ -51,6 +57,18 @@ async def dbg_recv_word(dut, clk_per_bit=CLK_PER_BIT):
     """4 little-endian bytes -> unsigned 32-bit int."""
     b = [await dbg_recv_byte(dut, clk_per_bit) for _ in range(4)]
     return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)
+
+
+async def dbg_send_halfword(dut, value, clk_per_bit=CLK_PER_BIT):
+    """2 little-endian bytes, e.g. READ_CSR's 12-bit CSR address arg."""
+    await dbg_send_byte(dut, value & 0xFF, clk_per_bit)
+    await dbg_send_byte(dut, (value >> 8) & 0xFF, clk_per_bit)
+
+
+async def dbg_send_word(dut, value, clk_per_bit=CLK_PER_BIT):
+    """4 little-endian bytes, e.g. READ_MMIO's 32-bit address arg."""
+    for i in range(4):
+        await dbg_send_byte(dut, (value >> (8 * i)) & 0xFF, clk_per_bit)
 
 
 @cocotb.test()
@@ -149,3 +167,69 @@ async def test_halt_step_resume(dut):
     )
 
     cocotb.log.info("Debug UART halt/step/read/resume cycle PASSED")
+
+
+@cocotb.test()
+async def test_read_csr(dut):
+    """READ_CSR isn't halt-gated -- read mstatus over the debug UART while
+    the core runs freely and cross-check against the direct dbg_csr_data
+    signal (which itself mirrors the core's combinational CSR read port,
+    see riscv_core.sv's dbg_csr_addr/dbg_csr_data)."""
+
+    dut.dbg_rx.value = 1  # idle high
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    words = assemble("test_basic.asm")
+    load_imem(dut, words)
+
+    await reset(dut)
+    await dbg_send_byte(dut, CMD_RESUME)
+    await run_cycles(dut, 20)
+
+    await dbg_send_byte(dut, CMD_READ_CSR)
+    await dbg_send_halfword(dut, CSR_MSTATUS)
+    got = await dbg_recv_word(dut)
+
+    # Ground truth: the core's own mstatus CSR register, read directly
+    # rather than by re-driving dbg_csr_addr (which already has a driver --
+    # debug_uart.sv's own output -- so forcing it from the testbench would
+    # just race that driver).
+    want = dut.u_core.csr_mstatus.value.to_unsigned()
+
+    assert got == want, f"READ_CSR(mstatus) over debug UART = 0x{got:08x}, direct read = 0x{want:08x}"
+
+    cocotb.log.info("Debug UART READ_CSR PASSED")
+
+
+@cocotb.test()
+async def test_read_mmio(dut):
+    """READ_MMIO is halt-gated like READ_MEM: halt the core, read the UART
+    status register over the debug UART, and cross-check against the
+    direct uart_tx_busy/uart_rx_done signals tb_soc.sv's status mux packs
+    into that register. Status is driven straight off the UART
+    peripheral's own outputs (not the core's dmem bus), so it can be
+    checked without forcing any core-driven signal from the testbench."""
+
+    dut.dbg_rx.value = 1  # idle high
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+
+    words = assemble("test_basic.asm")
+    load_imem(dut, words)
+
+    await reset(dut)
+
+    # debug_uart halts the core by default on reset in tb_soc (no
+    # KEY[1]-style override) -- so it's already halted, matching
+    # READ_MMIO's halt-only requirement without needing an explicit HALT.
+    await run_cycles(dut, 5)
+
+    await dbg_send_byte(dut, CMD_READ_MMIO)
+    await dbg_send_word(dut, UART_STATUS_ADDR)
+    got = await dbg_recv_word(dut)
+
+    want = (int(dut.uart_rx_done.value) << 1) | int(dut.uart_tx_busy.value)
+    assert got == want, f"READ_MMIO(UART_STATUS) over debug UART = 0x{got:08x}, direct read = 0x{want:08x}"
+
+    cocotb.log.info("Debug UART READ_MMIO PASSED")

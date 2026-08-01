@@ -1,9 +1,24 @@
 # tests/utils.py
 
+import inspect
 import subprocess
 import struct
 import os
+from cocotb.clock import Clock as CocotbClock
 from cocotb.triggers import RisingEdge
+
+
+# Keep compatibility with older test code that used `unit="ns"`.
+# cocotb 1.9+ expects `units="ns"`.
+if "unit" in inspect.signature(CocotbClock.__init__).parameters:
+    _orig_clock_init = CocotbClock.__init__
+
+    def _clock_init_compat(self, signal, period, *args, **kwargs):
+        if "unit" in kwargs and "units" not in kwargs:
+            kwargs["units"] = kwargs.pop("unit")
+        return _orig_clock_init(self, signal, period, *args, **kwargs)
+
+    CocotbClock.__init__ = _clock_init_compat
 
 
 # *****************************

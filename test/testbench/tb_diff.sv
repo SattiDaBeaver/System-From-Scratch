@@ -31,6 +31,12 @@ module tb_diff #(
     logic [31:0] dbg_reg_data;
     logic [31:0] pc_dbg;
 
+    // Debug CSR read -- no debug_uart instance here, just expose for
+    // direct signal access (dut.u_core.dbg_csr_data), mirroring
+    // tb_core.sv's treatment.
+    logic [11:0] dbg_csr_addr;
+    logic [31:0] dbg_csr_data;
+
     riscv_core #(
         .ISA ("RV32I")
     ) u_core (
@@ -51,6 +57,8 @@ module tb_diff #(
         .dmem_vld    (1'b1),
         .dbg_reg_addr(dbg_reg_addr),
         .dbg_reg_data(dbg_reg_data),
+        .dbg_csr_addr(dbg_csr_addr),
+        .dbg_csr_data(dbg_csr_data),
         .pc_dbg      (pc_dbg),
         .timer_irq   (1'b0)
     );
@@ -82,6 +90,9 @@ module tb_diff #(
     logic [31:0] dbg_reg_data_ref;
     logic [31:0] pc_dbg_ref;
 
+    logic [11:0] dbg_csr_addr_ref;
+    logic [31:0] dbg_csr_data_ref;
+
     riscv_core_single_cycle #(
         .ISA ("RV32I")
     ) u_core_ref (
@@ -102,6 +113,8 @@ module tb_diff #(
         .dmem_vld    (1'b1),
         .dbg_reg_addr(dbg_reg_addr_ref),
         .dbg_reg_data(dbg_reg_data_ref),
+        .dbg_csr_addr(dbg_csr_addr_ref),
+        .dbg_csr_data(dbg_csr_data_ref),
         .pc_dbg      (pc_dbg_ref)
     );
 

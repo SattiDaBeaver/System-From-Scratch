@@ -40,30 +40,32 @@
 module dp_ram (
 	address_a,
 	address_b,
+	byteena_a,
+	byteena_b,
 	clock,
 	data_a,
 	data_b,
 	wren_a,
 	wren_b,
-	byteena_a,
-	byteena_b,
 	q_a,
 	q_b);
 
 	input	[11:0]  address_a;
 	input	[11:0]  address_b;
+	input	[3:0]  byteena_a;
+	input	[3:0]  byteena_b;
 	input	  clock;
 	input	[31:0]  data_a;
 	input	[31:0]  data_b;
 	input	  wren_a;
 	input	  wren_b;
-	input	[3:0]   byteena_a;
-	input	[3:0]   byteena_b;
 	output	[31:0]  q_a;
 	output	[31:0]  q_b;
 `ifndef ALTERA_RESERVED_QIS
 // synopsys translate_off
 `endif
+	tri1	[3:0]  byteena_a;
+	tri1	[3:0]  byteena_b;
 	tri1	  clock;
 	tri0	  wren_a;
 	tri0	  wren_b;
@@ -79,13 +81,13 @@ module dp_ram (
 	altsyncram	altsyncram_component (
 				.address_a (address_a),
 				.address_b (address_b),
+				.byteena_a (byteena_a),
+				.byteena_b (byteena_b),
 				.clock0 (clock),
 				.data_a (data_a),
 				.data_b (data_b),
 				.wren_a (wren_a),
 				.wren_b (wren_b),
-				.byteena_a (byteena_a),
-				.byteena_b (byteena_b),
 				.q_a (sub_wire0),
 				.q_b (sub_wire1),
 				.aclr0 (1'b0),
@@ -102,12 +104,14 @@ module dp_ram (
 				.rden_b (1'b1));
 	defparam
 		altsyncram_component.address_reg_b = "CLOCK0",
+		altsyncram_component.byteena_reg_b = "CLOCK0",
+		altsyncram_component.byte_size = 8,
 		altsyncram_component.clock_enable_input_a = "BYPASS",
 		altsyncram_component.clock_enable_input_b = "BYPASS",
 		altsyncram_component.clock_enable_output_a = "BYPASS",
 		altsyncram_component.clock_enable_output_b = "BYPASS",
 		altsyncram_component.indata_reg_b = "CLOCK0",
-		altsyncram_component.init_file = "programs/test_vga/test_vga.mif",
+		altsyncram_component.init_file = "../programs/vga_checkerboard/vga_checkerboard.mif",
 		altsyncram_component.intended_device_family = "MAX 10",
 		altsyncram_component.lpm_type = "altsyncram",
 		altsyncram_component.numwords_a = 4096,
@@ -140,8 +144,8 @@ endmodule
 // Retrieval info: PRIVATE: ADDRESSSTALL_B NUMERIC "0"
 // Retrieval info: PRIVATE: BYTEENA_ACLR_A NUMERIC "0"
 // Retrieval info: PRIVATE: BYTEENA_ACLR_B NUMERIC "0"
-// Retrieval info: PRIVATE: BYTE_ENABLE_A NUMERIC "0"
-// Retrieval info: PRIVATE: BYTE_ENABLE_B NUMERIC "0"
+// Retrieval info: PRIVATE: BYTE_ENABLE_A NUMERIC "1"
+// Retrieval info: PRIVATE: BYTE_ENABLE_B NUMERIC "1"
 // Retrieval info: PRIVATE: BYTE_SIZE NUMERIC "8"
 // Retrieval info: PRIVATE: BlankMemory NUMERIC "0"
 // Retrieval info: PRIVATE: CLOCK_ENABLE_INPUT_A NUMERIC "0"
@@ -168,7 +172,7 @@ endmodule
 // Retrieval info: PRIVATE: MAXIMUM_DEPTH NUMERIC "0"
 // Retrieval info: PRIVATE: MEMSIZE NUMERIC "131072"
 // Retrieval info: PRIVATE: MEM_IN_BITS NUMERIC "0"
-// Retrieval info: PRIVATE: MIFfilename STRING "../programs/test_vga/test_vga.mif"
+// Retrieval info: PRIVATE: MIFfilename STRING "../programs/vga_checkerboard/vga_checkerboard.mif"
 // Retrieval info: PRIVATE: OPERATION_MODE NUMERIC "3"
 // Retrieval info: PRIVATE: OUTDATA_ACLR_B NUMERIC "0"
 // Retrieval info: PRIVATE: OUTDATA_REG_B NUMERIC "0"
@@ -197,12 +201,14 @@ endmodule
 // Retrieval info: PRIVATE: rden NUMERIC "0"
 // Retrieval info: LIBRARY: altera_mf altera_mf.altera_mf_components.all
 // Retrieval info: CONSTANT: ADDRESS_REG_B STRING "CLOCK0"
+// Retrieval info: CONSTANT: BYTEENA_REG_B STRING "CLOCK0"
+// Retrieval info: CONSTANT: BYTE_SIZE NUMERIC "8"
 // Retrieval info: CONSTANT: CLOCK_ENABLE_INPUT_A STRING "BYPASS"
 // Retrieval info: CONSTANT: CLOCK_ENABLE_INPUT_B STRING "BYPASS"
 // Retrieval info: CONSTANT: CLOCK_ENABLE_OUTPUT_A STRING "BYPASS"
 // Retrieval info: CONSTANT: CLOCK_ENABLE_OUTPUT_B STRING "BYPASS"
 // Retrieval info: CONSTANT: INDATA_REG_B STRING "CLOCK0"
-// Retrieval info: CONSTANT: INIT_FILE STRING "../programs/test_vga/test_vga.mif"
+// Retrieval info: CONSTANT: INIT_FILE STRING "../programs/vga_checkerboard/vga_checkerboard.mif"
 // Retrieval info: CONSTANT: INTENDED_DEVICE_FAMILY STRING "MAX 10"
 // Retrieval info: CONSTANT: LPM_TYPE STRING "altsyncram"
 // Retrieval info: CONSTANT: NUMWORDS_A NUMERIC "4096"
@@ -221,11 +227,13 @@ endmodule
 // Retrieval info: CONSTANT: WIDTHAD_B NUMERIC "12"
 // Retrieval info: CONSTANT: WIDTH_A NUMERIC "32"
 // Retrieval info: CONSTANT: WIDTH_B NUMERIC "32"
-// Retrieval info: CONSTANT: WIDTH_BYTEENA_A NUMERIC "1"
-// Retrieval info: CONSTANT: WIDTH_BYTEENA_B NUMERIC "1"
+// Retrieval info: CONSTANT: WIDTH_BYTEENA_A NUMERIC "4"
+// Retrieval info: CONSTANT: WIDTH_BYTEENA_B NUMERIC "4"
 // Retrieval info: CONSTANT: WRCONTROL_WRADDRESS_REG_B STRING "CLOCK0"
 // Retrieval info: USED_PORT: address_a 0 0 12 0 INPUT NODEFVAL "address_a[11..0]"
 // Retrieval info: USED_PORT: address_b 0 0 12 0 INPUT NODEFVAL "address_b[11..0]"
+// Retrieval info: USED_PORT: byteena_a 0 0 4 0 INPUT VCC "byteena_a[3..0]"
+// Retrieval info: USED_PORT: byteena_b 0 0 4 0 INPUT VCC "byteena_b[3..0]"
 // Retrieval info: USED_PORT: clock 0 0 0 0 INPUT VCC "clock"
 // Retrieval info: USED_PORT: data_a 0 0 32 0 INPUT NODEFVAL "data_a[31..0]"
 // Retrieval info: USED_PORT: data_b 0 0 32 0 INPUT NODEFVAL "data_b[31..0]"
@@ -235,6 +243,8 @@ endmodule
 // Retrieval info: USED_PORT: wren_b 0 0 0 0 INPUT GND "wren_b"
 // Retrieval info: CONNECT: @address_a 0 0 12 0 address_a 0 0 12 0
 // Retrieval info: CONNECT: @address_b 0 0 12 0 address_b 0 0 12 0
+// Retrieval info: CONNECT: @byteena_a 0 0 4 0 byteena_a 0 0 4 0
+// Retrieval info: CONNECT: @byteena_b 0 0 4 0 byteena_b 0 0 4 0
 // Retrieval info: CONNECT: @clock0 0 0 0 0 clock 0 0 0 0
 // Retrieval info: CONNECT: @data_a 0 0 32 0 data_a 0 0 32 0
 // Retrieval info: CONNECT: @data_b 0 0 32 0 data_b 0 0 32 0
@@ -247,5 +257,5 @@ endmodule
 // Retrieval info: GEN_FILE: TYPE_NORMAL dp_ram.cmp FALSE
 // Retrieval info: GEN_FILE: TYPE_NORMAL dp_ram.bsf FALSE
 // Retrieval info: GEN_FILE: TYPE_NORMAL dp_ram_inst.v FALSE
-// Retrieval info: GEN_FILE: TYPE_NORMAL dp_ram_bb.v TRUE
+// Retrieval info: GEN_FILE: TYPE_NORMAL dp_ram_bb.v FALSE
 // Retrieval info: LIB_FILE: altera_mf

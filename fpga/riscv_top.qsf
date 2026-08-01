@@ -442,6 +442,11 @@ set_global_assignment -name POWER_BOARD_THERMAL_MODEL "NONE (CONSERVATIVE)"
 # riscv_top's CORE_TYPE parameter picks the elaborated core (default
 # "PIPELINED"); to build the frozen single-cycle golden model instead:
 #   set_parameter -name CORE_TYPE "SINGLE_CYCLE"
+# riscv_top's CORE_TYPE parameter picks the elaborated core (default
+# "PIPELINED"); to build the frozen single-cycle golden model instead:
+#   set_parameter -name CORE_TYPE "SINGLE_CYCLE"
+set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/vga.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/timer.sv
 set_global_assignment -name MIF_FILE programs/test_vga/test_vga.mif
 set_global_assignment -name SYSTEMVERILOG_FILE hex_display.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/riscv_core/riscv_core.sv
@@ -451,9 +456,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/debug_uart.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/dp_ram_sync_read.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../src/peripherals/vga_framebuffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE riscv_top.sv
-# riscv_top's CORE_TYPE parameter picks the elaborated core (default
-# "PIPELINED"); to build the frozen single-cycle golden model instead:
-#   set_parameter -name CORE_TYPE "SINGLE_CYCLE"
 set_global_assignment -name VERILOG_FILE dp_ram.v
 set_global_assignment -name SOURCE_FILE db/riscv_top.cmp.rdb
 set_global_assignment -name QIP_FILE dp_ram.qip

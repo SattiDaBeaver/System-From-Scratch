@@ -17,6 +17,9 @@
 | `0x20000004` | `0x20000004` | 4B   | VGA_STATUS, read-only (bit0 = SWAP_PENDING) |
 | `0x20001000` | `0x20001FFF` | 4KB page (2400B used) | VGA draw buffer -- fixed logical address, remapped internally by `vga_framebuffer.sv` to whichever physical buffer software should be drawing into (the scanned-out buffer in single-buffer mode, the back buffer in double-buffer mode) |
 | `0x20002000` | `0x20002FFF` | 4KB page (2400B used) | VGA debug-peek buffer -- fixed logical address, always maps to the physical buffer NOT currently mapped at the draw address; lets `reg_debugger.py` READ_MEM inspect the other buffer regardless of mode |
+| `0x30000000` | `0x30000000` | 4B   | Timer RELOAD (rw) |
+| `0x30000004` | `0x30000004` | 4B   | Timer CTRL (rw, bit0 = EN) |
+| `0x30000008` | `0x30000008` | 4B   | Timer STATUS (bit0 = pending, write-1-to-clear) |
 
 ### VGA framebuffer (`src/peripherals/vga_framebuffer.sv`)
 
@@ -72,8 +75,25 @@ a known-unconditional jump (folded into `ex_flush`/`next_pc`), with a
 stall added ahead of them in ID for any still-in-flight CSR write to the
 same `mtvec`/`mepc` they read.
 
-Not yet implemented: `mstatus` MIE/MPIE bit stacking (no interrupt logic
-or privilege-mode state exists yet to give those bits real meaning), any
-real privilege modes, and timer/external interrupts.
+Timer interrupts (pipelined core only): `src/peripherals/timer.sv` is a
+simple periodic down-counter (RELOAD/CTRL.EN/STATUS.pending register
+map at `0x30000000`, see the memory map above) that drives a level `irq`
+output, wired into `riscv_core.sv` as `timer_irq` and mirrored
+combinationally into `mip` bit 7 (MTIP). `irq_taken` is level-driven
+(`mstatus.MIE && mie.MTIE && timer_irq`) rather than tied to a specific
+instruction, checked against whatever instruction is currently resolving
+in EX; it is gated only by an in-progress ECALL/EBREAK/MRET (never by an
+ordinary taken branch/jal/jalr, since a tight self-loop resolves as a
+taken jal every cycle and would otherwise make the interrupt
+unreachable while spinning). A taken interrupt redirects to `mtvec`
+(same vector traps already use -- no vectored mode), sets `mcause` to
+`0x80000007` (machine timer interrupt), and stacks `mstatus`: `MPIE <-
+MIE`, `MIE <- 0` on entry, restored (`MIE <- MPIE`, `MPIE <- 1`) on
+MRET, so a handler can't be re-interrupted until it explicitly returns.
+
+Not yet implemented: `mstatus` MIE/MPIE stacking and timer-interrupt
+support on the frozen single-cycle core (`riscv_core_single_cycle.sv`)
+-- deliberately out of scope for this pass, see `docs/04_pipeline_plan.md`
+-- and any real privilege modes.
 
 ## Target clock frequency

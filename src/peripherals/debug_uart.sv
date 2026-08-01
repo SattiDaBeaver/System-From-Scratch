@@ -27,6 +27,37 @@
 //   0x08 <addr32>  -> READ_MEM. Only accepted while halted; ignored
 //                     otherwise. Replies with 4 bytes, little-endian,
 //                     the word at addr32.
+//   0x09 <addr16>  -> READ_CSR. addr16 is a 2-byte little-endian CSR
+//                     address (only the low 12 bits are meaningful --
+//                     RISC-V CSR addresses are 12 bits). Replies with 4
+//                     bytes, little-endian, the core's dbg_csr_data for
+//                     that address (mstatus/mie/mtvec/mscratch/mepc/
+//                     mcause/mtval/mip; anything else reads as 0, same
+//                     "unimplemented CSR reads 0" contract the core's own
+//                     CSR instructions already use). Unlike READ_MEM this
+//                     is not halt-gated -- CSR reads are a plain
+//                     combinational core output, no memory-arbitration
+//                     hazard to avoid.
+//   0x0A <addr32>  -> READ_MMIO. Only accepted while halted; ignored
+//                     otherwise (same restriction as READ_MEM -- this
+//                     shares its host-side pacing contract). Replies with
+//                     4 bytes, little-endian, the peripheral register at
+//                     addr32 (UART TX/RX/STATUS at 0x1000_0000-0x0C,
+//                     Timer RELOAD/CTRL/STATUS at 0x3000_0000-0x08 -- see
+//                     docs/01_architecture.md's memory map). Read-only:
+//                     there is deliberately no WRITE_MMIO, since poking
+//                     live peripheral registers over this side-channel
+//                     while a program may resume any moment has real
+//                     side effects unlike BRAM (which WRITE_MEM already
+//                     restricts to halted-only for the same reason).
+//                     Addresses outside the covered peripherals read as
+//                     0. VGA framebuffer is intentionally not covered by
+//                     this command -- it already exposes a software-side
+//                     debug-peek buffer address instead (see
+//                     docs/01_architecture.md), and folding its
+//                     multi-cycle read pipeline into this single-cycle
+//                     command would risk disturbing its scanout/swap
+//                     timing for no real benefit.
 //
 // A host can therefore load a whole program with HALT, a WRITE_MEM per
 // word, then RESUME -- no assembly running on the core required, unlike
@@ -47,6 +78,11 @@ module debug_uart #(
     input  logic [31:0]  dbg_reg_data,
     input  logic [31:0]  pc_dbg,
 
+    // Debug-driven CSR read (async, combinational on the core side -- no
+    // halt/timing hazard the way memory access has, see READ_CSR above).
+    output logic [11:0]  dbg_csr_addr,
+    input  logic [31:0]  dbg_csr_data,
+
     // Debug-driven BRAM port B access (hardware bootloader). dbg_mem_valid
     // tells the top-level mux to route BRAM port B's address/data/write
     // lines to these signals instead of the core's this cycle.
@@ -55,6 +91,14 @@ module debug_uart #(
     output logic         dbg_mem_we,
     output logic         dbg_mem_valid,
     input  logic [31:0]  dbg_mem_rdata,
+
+    // Debug-driven MMIO peripheral read (READ_MMIO above). Top level
+    // steers its uart_sel/vga_sel/timer_sel-style decoder off
+    // dbg_mmio_addr instead of dmem_addr while dbg_mmio_valid is high,
+    // mirroring how dbg_mem_valid already steers BRAM port B.
+    output logic [31:0]  dbg_mmio_addr,
+    output logic         dbg_mmio_valid,
+    input  logic [31:0]  dbg_mmio_rdata,
 
     output logic         halt
 );
@@ -67,8 +111,13 @@ module debug_uart #(
     localparam logic [7:0] CMD_READ_ALL  = 8'h06;
     localparam logic [7:0] CMD_WRITE_MEM = 8'h07;
     localparam logic [7:0] CMD_READ_MEM  = 8'h08;
+    localparam logic [7:0] CMD_READ_CSR  = 8'h09;
+    localparam logic [7:0] CMD_READ_MMIO = 8'h0A;
 
-    typedef enum logic [3:0] {
+    // Widened from [3:0] to [4:0] -- the original 13 states fit in 4 bits,
+    // but the 4 new CSR/MMIO states below push the count to 17, one past
+    // what 4 bits can hold.
+    typedef enum logic [4:0] {
         CMD_IDLE,
         WAIT_ARG,
         STEP_ASSERT,
@@ -81,7 +130,11 @@ module debug_uart #(
         RECV_MEM_DATA,
         MEM_WRITE_PULSE,
         MEM_READ_WAIT,
-        MEM_READ_LATCH
+        MEM_READ_LATCH,
+        WAIT_ARG_CSR,
+        RECV_MMIO_ADDR,
+        MMIO_READ_WAIT,
+        MMIO_READ_LATCH
     } state_t;
 
     state_t state;
@@ -95,6 +148,14 @@ module debug_uart #(
     logic [31:0] mem_wdata;   // WRITE_MEM data, being assembled byte-by-byte
     logic [1:0]  rx_byte_idx; // byte within mem_addr/mem_wdata, 0 = LSB
     logic        mem_is_write;
+
+    logic [15:0] csr_addr_pending;  // READ_CSR's 2-byte arg, assembled byte-by-byte
+    logic        csr_byte_idx;      // byte within csr_addr_pending, 0 = LSB (1 bit: only 2 bytes)
+    logic        reading_csr;       // SEND_LOAD mux select: word_sel can't hold a 12-bit
+                                     // CSR address, so this latch picks dbg_csr_data instead
+                                     // of dbg_reg_data/pc_dbg for the current SEND_LOAD pass.
+
+    logic [31:0] mmio_addr;   // READ_MMIO target address, being assembled byte-by-byte
 
     // Multi-byte commands (WAIT_ARG, RECV_MEM_ADDR, RECV_MEM_DATA) assemble
     // their argument one UART byte at a time with no upper bound on how
@@ -138,6 +199,11 @@ module debug_uart #(
     // directly and needs no addressing.
     assign dbg_reg_addr = word_sel[4:0];
 
+    // Async CSR read, same style as dbg_reg_addr above -- csr_addr_pending
+    // holds whatever READ_CSR's 2-byte arg assembled to, continuously
+    // driving the core's combinational dbg_csr_data output.
+    assign dbg_csr_addr = csr_addr_pending[11:0];
+
     // dbg_mem_* are continuous outputs of the currently-assembled
     // address/data registers and the FSM state -- top-level only needs to
     // look at dbg_mem_valid to know whether to steer BRAM port B here
@@ -148,6 +214,13 @@ module debug_uart #(
     assign dbg_mem_valid = (state == MEM_WRITE_PULSE) ||
                             (state == MEM_READ_WAIT)  ||
                             (state == MEM_READ_LATCH);
+
+    // dbg_mmio_* mirror dbg_mem_* above, but for the read-only MMIO peek
+    // path -- top level steers its peripheral sel decoder off
+    // dbg_mmio_addr instead of dmem_addr while dbg_mmio_valid is high.
+    assign dbg_mmio_addr  = mmio_addr;
+    assign dbg_mmio_valid = (state == MMIO_READ_WAIT) ||
+                             (state == MMIO_READ_LATCH);
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -162,6 +235,10 @@ module debug_uart #(
             mem_wdata    <= 32'd0;
             rx_byte_idx  <= 2'd0;
             mem_is_write <= 1'b0;
+            csr_addr_pending <= 16'd0;
+            csr_byte_idx     <= 1'b0;
+            reading_csr      <= 1'b0;
+            mmio_addr        <= 32'd0;
             rx_timeout_cnt <= 32'd0;
         end
         else begin
@@ -184,14 +261,21 @@ module debug_uart #(
                                 state          <= WAIT_ARG;
                             end
                             CMD_READ_PC: begin
-                                word_sel   <= 6'd32;
-                                word_count <= 6'd1;
-                                state      <= SEND_LOAD;
+                                word_sel    <= 6'd32;
+                                word_count  <= 6'd1;
+                                reading_csr <= 1'b0;
+                                state       <= SEND_LOAD;
                             end
                             CMD_READ_ALL: begin
-                                word_sel   <= 6'd0;
-                                word_count <= 6'd33;
-                                state      <= SEND_LOAD;
+                                word_sel    <= 6'd0;
+                                word_count  <= 6'd33;
+                                reading_csr <= 1'b0;
+                                state       <= SEND_LOAD;
+                            end
+                            CMD_READ_CSR: begin
+                                csr_byte_idx   <= 1'b0;
+                                rx_timeout_cnt <= 32'd0;
+                                state          <= WAIT_ARG_CSR;
                             end
                             CMD_WRITE_MEM: begin
                                 // Only accepted while halted -- silently
@@ -213,6 +297,15 @@ module debug_uart #(
                                     state          <= RECV_MEM_ADDR;
                                 end
                             end
+                            CMD_READ_MMIO: begin
+                                // Only accepted while halted -- shares
+                                // READ_MEM's host-side pacing contract.
+                                if (halt) begin
+                                    rx_byte_idx    <= 2'd0;
+                                    rx_timeout_cnt <= 32'd0;
+                                    state          <= RECV_MMIO_ADDR;
+                                end
+                            end
                             default: ; // ignore unknown command byte
                         endcase
                     end
@@ -220,16 +313,36 @@ module debug_uart #(
 
                 WAIT_ARG: begin
                     if (rx_done) begin
-                        word_sel   <= {1'b0, rx_data[4:0]}; // clamp to 0-31
-                        word_count <= 6'd1;
-                        state      <= SEND_LOAD;
+                        word_sel    <= {1'b0, rx_data[4:0]}; // clamp to 0-31
+                        word_count  <= 6'd1;
+                        reading_csr <= 1'b0;
+                        state       <= SEND_LOAD;
                     end
                     else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
                         state <= CMD_IDLE; // arg byte never arrived -- give up and re-sync
                     end
                 end
 
-                // Drop halt for exactly one clk cycle, then reassert.
+                // Assemble READ_CSR's 2-byte little-endian CSR address,
+                // same byte-at-a-time style as RECV_MEM_ADDR below but
+                // half the width.
+                WAIT_ARG_CSR: begin
+                    if (rx_done) begin
+                        csr_addr_pending[8*csr_byte_idx +: 8] <= rx_data;
+                        rx_timeout_cnt <= 32'd0;
+                        if (csr_byte_idx == 1'b1) begin
+                            word_count  <= 6'd1;
+                            reading_csr <= 1'b1;
+                            state       <= SEND_LOAD;
+                        end
+                        else begin
+                            csr_byte_idx <= 1'b1;
+                        end
+                    end
+                    else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
+                        state <= CMD_IDLE; // arg byte never arrived -- give up and re-sync
+                    end
+                end
                 STEP_ASSERT: begin
                     halt  <= 1'b0;
                     state <= STEP_DEASSERT;
@@ -241,7 +354,8 @@ module debug_uart #(
                 end
 
                 SEND_LOAD: begin
-                    cur_word <= (word_sel < 6'd32) ? dbg_reg_data : pc_dbg;
+                    cur_word <= reading_csr    ? dbg_csr_data :
+                                (word_sel < 6'd32) ? dbg_reg_data : pc_dbg;
                     byte_sel <= 2'd0;
                     state    <= SEND_BYTE_START;
                 end
@@ -338,6 +452,42 @@ module debug_uart #(
                     word_count <= 6'd1;
                     byte_sel   <= 2'd0;
                     state      <= SEND_BYTE_START;
+                end
+
+                // Assemble the 4-byte little-endian address for
+                // READ_MMIO. No write branch -- there is deliberately no
+                // WRITE_MMIO (see header comment above).
+                RECV_MMIO_ADDR: begin
+                    if (rx_done) begin
+                        mmio_addr[8*rx_byte_idx +: 8] <= rx_data;
+                        rx_timeout_cnt <= 32'd0;
+                        if (rx_byte_idx == 2'd3) begin
+                            rx_byte_idx <= 2'd0;
+                            state       <= MMIO_READ_WAIT;
+                        end
+                        else begin
+                            rx_byte_idx <= rx_byte_idx + 2'd1;
+                        end
+                    end
+                    else if (rx_timeout_cnt >= clk_per_bit * TIMEOUT_BIT_PERIODS) begin
+                        state <= CMD_IDLE; // stalled mid-address -- give up and re-sync
+                    end
+                end
+
+                // dbg_mmio_valid steers the top level's peripheral decoder
+                // to mmio_addr this cycle (see assign above); wait one
+                // cycle before latching dbg_mmio_rdata, same reasoning as
+                // MEM_READ_WAIT above.
+                MMIO_READ_WAIT: begin
+                    state <= MMIO_READ_LATCH;
+                end
+
+                MMIO_READ_LATCH: begin
+                    cur_word    <= dbg_mmio_rdata;
+                    word_count  <= 6'd1;
+                    byte_sel    <= 2'd0;
+                    reading_csr <= 1'b0;
+                    state       <= SEND_BYTE_START;
                 end
 
                 default: state <= CMD_IDLE;

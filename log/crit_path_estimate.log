@@ -1,0 +1,3 @@
+[2026-07-30 13:59] top=riscv_core mode=fast cells=25367 ltp_length=73
+[2026-07-30 14:02] top=riscv_core_single_cycle mode=fast cells=22608 ltp_length=81
+[2026-07-30 16:51] top=riscv_core mode=full cells=13817 ltp_length=1451

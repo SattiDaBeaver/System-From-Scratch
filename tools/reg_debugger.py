@@ -19,6 +19,17 @@
 #   0x08 <addr32>  -> READ_MEM, 4 bytes LE, word at addr32. Only accepted
 #                     while halted -- silently ignored otherwise (read
 #                     will then time out, since no reply is sent).
+#   0x09 <addr16>  -> READ_CSR, 4 bytes LE, dbg_csr_data for the given
+#                     12-bit CSR address (mstatus/mie/mtvec/mscratch/mepc/
+#                     mcause/mtval/mip; anything else reads as 0). Not
+#                     halt-gated -- CSR reads are a plain combinational
+#                     core output.
+#   0x0A <addr32>  -> READ_MMIO, 4 bytes LE, peripheral register at
+#                     addr32 (UART TX/RX/STATUS, Timer RELOAD/CTRL/STATUS
+#                     -- see docs/01_architecture.md). Only accepted while
+#                     halted, same restriction as READ_MEM. Read-only; VGA
+#                     is not covered (use READ_MEM against its debug-peek
+#                     buffer address instead).
 
 import struct
 import sys
@@ -36,6 +47,32 @@ CMD_READ_PC   = 0x05
 CMD_READ_ALL  = 0x06
 CMD_WRITE_MEM = 0x07
 CMD_READ_MEM  = 0x08
+CMD_READ_CSR  = 0x09
+CMD_READ_MMIO = 0x0A
+
+# Mirrors the CSR addresses debug_uart.sv/riscv_core(_single_cycle).sv's
+# dbg_csr_data actually implements -- anything else reads as 0.
+CSR_NAMES = {
+    0x300: "mstatus",
+    0x304: "mie",
+    0x305: "mtvec",
+    0x340: "mscratch",
+    0x341: "mepc",
+    0x342: "mcause",
+    0x343: "mtval",
+    0x344: "mip",
+}
+
+# Mirrors docs/01_architecture.md's memory map for the peripherals
+# READ_MMIO can reach (UART + Timer; VGA is intentionally excluded).
+MMIO_NAMES = {
+    0x10000000: "UART_TX",
+    0x10000004: "UART_RX",
+    0x10000008: "UART_STATUS",
+    0x30000000: "TIMER_RELOAD",
+    0x30000004: "TIMER_CTRL",
+    0x30000008: "TIMER_STATUS",
+}
 
 
 class _DryRunSerial:
@@ -121,6 +158,19 @@ class RegDebugger:
         no burst-read command in the wire protocol, so this is just n
         round-trips. Only accepted while halted, same as read_mem()."""
         return [self.read_mem(addr + 4 * i) for i in range(n)]
+
+    def read_csr(self, addr):
+        """READ_CSR. Not halt-gated -- addr is a 12-bit CSR address (see
+        CSR_NAMES); anything the core doesn't implement reads back as 0."""
+        self.ser.write(bytes([CMD_READ_CSR]) + struct.pack('<H', addr))
+        return self._read_word()
+
+    def read_mmio(self, addr):
+        """READ_MMIO. Only accepted while halted; if not halted, the
+        hardware sends no reply and this will time out waiting for one.
+        Covers UART/Timer registers only -- see MMIO_NAMES."""
+        self.ser.write(bytes([CMD_READ_MMIO]) + struct.pack('<I', addr))
+        return self._read_word()
 
     def load_program(self, words, base_addr=0):
         """Convenience wrapper for the hardware bootloader path: HALT, then
@@ -237,6 +287,10 @@ def main():
     wmem_p.add_argument("data", type=lambda s: int(s, 0), help="32-bit word value")
     rmem_p = sub.add_parser("read-mem", help="read one 32-bit word from memory (core must be halted)")
     rmem_p.add_argument("addr", type=lambda s: int(s, 0), help="byte address (e.g. 0x1000)")
+    csr_p = sub.add_parser("read-csr", help="read a CSR by 12-bit address (not halt-gated)")
+    csr_p.add_argument("addr", type=lambda s: int(s, 0), help="CSR address (e.g. 0x300 for mstatus)")
+    mmio_p = sub.add_parser("read-mmio", help="read a UART/Timer MMIO register (core must be halted)")
+    mmio_p.add_argument("addr", type=lambda s: int(s, 0), help="byte address (e.g. 0x10000000)")
     hexdump_p = sub.add_parser("hexdump", help="read N consecutive 32-bit words starting at addr (core must be halted)")
     hexdump_p.add_argument("addr", type=lambda s: int(s, 0), help="starting byte address (e.g. 0x1000)")
     hexdump_p.add_argument("n", type=int, help="number of consecutive 32-bit words to read")
@@ -278,6 +332,14 @@ def main():
         elif args.cmd == "read-mem":
             val = dbg.read_mem(args.addr)
             print(f"0x{args.addr:08x}: 0x{val:08x} ({val})")
+        elif args.cmd == "read-csr":
+            val = dbg.read_csr(args.addr)
+            name = CSR_NAMES.get(args.addr, "?")
+            print(f"csr 0x{args.addr:03x} ({name}): 0x{val:08x} ({val})")
+        elif args.cmd == "read-mmio":
+            val = dbg.read_mmio(args.addr)
+            name = MMIO_NAMES.get(args.addr, "?")
+            print(f"mmio 0x{args.addr:08x} ({name}): 0x{val:08x} ({val})")
         elif args.cmd == "hexdump":
             words = dbg.read_mem_range(args.addr, args.n)
             print_hexdump(args.addr, words)
